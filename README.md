@@ -8,11 +8,11 @@ This is an extension of [rahulnyk](https://github.com/rahulnyk/knowledge_graph/t
 ### Preparation
 1. Clone this repo to a folder of your choice
 2. In a folder of your choice, create a file named ".env"
-3. Using Azure OpenAI Services, enter the variables in the .env file:
-    AZURE_OPENAI_API_KEY = "..."
-    AZURE_OPENAI_ENDPOINT = "..."
-    AZURE_OPENAI_API_VERSION = "..."
-    AZURE_OPENAI_DEPLOYMENT_NAME = "..."
+3. Using Azure OpenAI Services, enter the variables in the .env file:<br>
+    AZURE_OPENAI_API_KEY = "..."<br>
+    AZURE_OPENAI_ENDPOINT = "..."<br>
+    AZURE_OPENAI_API_VERSION = "..."<br>
+    AZURE_OPENAI_DEPLOYMENT_NAME = "..."<br>
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "..."<br>
 The value of this variable can be found in your Azure OpenAI Services subscription
 
@@ -24,9 +24,8 @@ NB: The chosen name of the environment folder is here venv. It can be changed to
 3. Activate this environment with <code>venv\Scripts\activate</code>
 4. All required packages can now be installed with <code>pip install -r requirements.txt</code>
 
-### Ingesting documents
-The file main.py can be used to vectorize all documents in a chosen folder and store the vectors and texts in a vector database for later use.<br>
-Execution is done in the activated virtual environment with python ingest.py
+### How to use
+
 <code>
     # First time (builds from scratch)
     python main.py --build

@@ -27,6 +27,7 @@ NB: The chosen name of the environment folder is here venv. It can be changed to
 ### How to use
 
 <code>
+    
     # First time (builds from scratch)
     python main.py --build
     

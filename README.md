@@ -5,7 +5,7 @@ Basic Knowledge Graph Implementation
 This is an extension of [rahulnyk](https://github.com/rahulnyk/knowledge_graph/tree/main)'s codebase of knowledge graph by Claude AI.
 
 
-### Preparation
+# Preparation
 1. Clone this repo to a folder of your choice
 2. In a folder of your choice, create a file named ".env"
 3. Using Azure OpenAI Services, enter the variables in the .env file:<br>
@@ -16,7 +16,7 @@ This is an extension of [rahulnyk](https://github.com/rahulnyk/knowledge_graph/t
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "..."<br>
 The value of this variable can be found in your Azure OpenAI Services subscription
 
-### Pip virtual environment setup
+# Pip virtual environment setup
 1. Open an Anaconda prompt or other command prompt
 2. Go to the root folder of the project and create a Python environment with pip with <code>python -m venv venv</code><br>
 This will create a basic virtual environment folder named venv in the root of your project folder
@@ -24,7 +24,7 @@ NB: The chosen name of the environment folder is here venv. It can be changed to
 3. Activate this environment with <code>venv\Scripts\activate</code>
 4. All required packages can now be installed with <code>pip install -r requirements.txt</code>
 
-### How to use
+# How to use
 
 <code>
     

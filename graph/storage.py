@@ -33,6 +33,7 @@ def _normalize_pair(a: str, b: str) -> Tuple[str, str]:
 
 
 # ---------------------------
+# ---------------------------
 # Embeddings
 # ---------------------------
 
@@ -46,7 +47,7 @@ class AzureEmbedder:
       - AZURE_OPENAI_EMB_DEPLOYMENT_NAME  (embedding deployment name)
     """
     def __init__(self):
-        if AzureOpenAI is None:
+        if AzureOpenAI is None:  # type: ignore[truthy-bool]
             raise RuntimeError("openai package not installed. pip install openai")
         endpoint = _get_env("AZURE_OPENAI_ENDPOINT")
         api_key = _get_env("AZURE_OPENAI_API_KEY")
@@ -85,6 +86,19 @@ class DocumentsDB:
     def __init__(self, db_path: str = "documents.sqlite"):
         self.db_path = db_path
         _ensure_dir_for(self.db_path)
+        self.KEYS = [
+            "doc_id",
+            "filename",
+            "filepath",
+            "file_size",
+            "last_modified",
+            "created",
+            "extension",
+            "mime_type",
+            "language",
+            "full_text",
+            "full_char_count",
+        ]
 
     @contextmanager
     def connect(self):
@@ -144,6 +158,56 @@ class DocumentsDB:
             ''', row)
             con.commit()
 
+    def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM documents WHERE doc_id = ?;", (doc_id,))
+            row = cur.fetchone()
+            if row:
+                return dict(zip(self.KEYS, row))
+            return None
+
+    def get_document_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM documents WHERE filename = ?;", (filename,))
+            row = cur.fetchone()
+            if row:
+                return dict(zip(self.KEYS, row))
+            return None
+        
+    def list_documents(self) -> List[Dict[str, Any]]:
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM documents;")
+            rows = cur.fetchall()
+            documents = []
+            for row in rows:
+                documents.append(dict(zip(self.KEYS, row)))
+            return documents
+
+    def delete_document(self, doc_id: str) -> None:
+        with self.connect() as con:
+            con.execute("DELETE FROM documents WHERE doc_id = ?;", (doc_id,))
+            con.commit()
+
+    def update_document(self, doc_id: str, updates: Dict[str, Any]) -> None:
+        if not updates:
+            return
+        allowed_keys = set(self.KEYS) - {"doc_id"}
+        set_clauses = []
+        values = []
+        for k, v in updates.items():
+            if k in allowed_keys:
+                set_clauses.append(f"{k} = ?")
+                values.append(v)
+        if not set_clauses:
+            return
+        values.append(doc_id)
+        set_clause = ", ".join(set_clauses)
+        with self.connect() as con:
+            con.execute(f"UPDATE documents SET {set_clause} WHERE doc_id = ?;", values)
+            con.commit()
 
 class ChunksDB:
     """
@@ -155,6 +219,16 @@ class ChunksDB:
     def __init__(self, db_path: str = "chunks.sqlite"):
         self.db_path = db_path
         _ensure_dir_for(self.db_path)
+        self.KEYS = [
+            "chunk_uuid",
+            "doc_id",
+            "chunk_id",
+            "filename",
+            "text",
+            "char_count",
+            "start_page",
+            "end_page"
+        ]
 
     @contextmanager
     def connect(self):
@@ -222,6 +296,73 @@ class ChunksDB:
             ''', rows)
             con.commit()
 
+    def get_chunks_by_doc_id(self, doc_id: str) -> List[Dict[str, Any]]:
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM chunks WHERE doc_id = ?;", (doc_id,))
+            rows = cur.fetchall()
+        return [dict(zip(self.KEYS, row)) for row in rows]
+
+    def get_chunks_by_filename(self, filename: str) -> List[Dict[str, Any]]:
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM chunks WHERE filename = ?;", (filename,))
+            rows = cur.fetchall()
+        return [dict(zip(self.KEYS, row)) for row in rows]
+
+    def get_chunk_by_uuid(self, chunk_uuid: str) -> List[Dict[str, Any]]:
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM chunks WHERE chunk_uuid = ?;", (chunk_uuid,))
+            rows = cur.fetchall()
+        return [dict(zip(self.KEYS, row)) for row in rows]
+
+    def get_chunks_by_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        if not chunk_uuids:
+            return []
+        placeholders = ', '.join('?' for _ in chunk_uuids)
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute(f"SELECT * FROM chunks WHERE chunk_uuid IN ({placeholders});", chunk_uuids)
+            rows = cur.fetchall()
+        return [dict(zip(self.KEYS, row)) for row in rows]
+    
+    def delete_chunks_by_doc_id(self, doc_id: str) -> None:
+        with self.connect() as con:
+            con.execute("DELETE FROM chunks WHERE doc_id = ?;", (doc_id,))
+            con.commit()
+
+    def delete_chunk_by_uuid(self, chunk_uuid: str) -> None:
+        with self.connect() as con:
+            con.execute("DELETE FROM chunks WHERE chunk_uuid = ?;", (chunk_uuid,))
+            con.commit()
+
+    def delete_chunks_by_uuids(self, chunk_uuids: List[str]) -> None:
+        if not chunk_uuids:
+            return
+        placeholders = ', '.join('?' for _ in chunk_uuids)
+        with self.connect() as con:
+            con.execute(f"DELETE FROM chunks WHERE chunk_uuid IN ({placeholders});", chunk_uuids)
+            con.commit()
+
+    def update_chunk(self, chunk_uuid: str, updates: Dict[str, Any]) -> None:
+        if not updates:
+            return
+        allowed_keys = set(self.KEYS) - {"chunk_uuid"}
+        set_clauses = []
+        values = []
+        for k, v in updates.items():
+            if k in allowed_keys:
+                set_clauses.append(f"{k} = ?")
+                values.append(v)
+        if not set_clauses:
+            return
+        values.append(chunk_uuid)
+        set_clause = ", ".join(set_clauses)
+        with self.connect() as con:
+            con.execute(f"UPDATE chunks SET {set_clause} WHERE chunk_uuid = ?;", values)
+            con.commit()
+
 
 class GraphDB:
     """
@@ -232,6 +373,8 @@ class GraphDB:
     def __init__(self, db_path: str = "graph.sqlite"):
         self.db_path = db_path
         _ensure_dir_for(self.db_path)
+        self.KEYS_NODE = ["id", "name", "type", "description", "source_id", "filepath"]
+        self.KEYS_EDGE = ["id", "source_name", "target_name", "weight", "description", "keywords", "source_id", "filepath", "u_source_name", "u_target_name"]
 
     @contextmanager
     def connect(self):
@@ -272,6 +415,9 @@ class GraphDB:
             );''')
             con.commit()
 
+    # ---------------------------
+    # NODE OPERATIONS
+    # ---------------------------
     def add_node(self, name: str, type: str, description: Optional[str] = None,
                  source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
         with self.connect() as con:
@@ -281,6 +427,90 @@ class GraphDB:
             ''', (name, type, description, source_id, filepath))
             con.commit()
 
+    def add_nodes(self, nodes: List[Dict[str, Any]]) -> None:
+        with self.connect() as con:
+            con.executemany('''
+                INSERT OR IGNORE INTO nodes (name, type, description, source_id, filepath)
+                VALUES (?, ?, ?, ?, ?);
+            ''', [(n['name'], n['type'], n.get('description'), n.get('source_id'), n.get('filepath')) for n in nodes])
+            con.commit()
+
+    def get_node(self, name: str, type: str) -> Optional[Dict[str, Any]]:
+        keys = [k for k in self.KEYS_NODE if k != "id"]
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute('''
+                SELECT name, type, description, source_id, filepath FROM nodes WHERE name = ? AND type = ?;
+            ''', (name, type))
+            row = cur.fetchone()
+            if row:
+                return dict(zip(keys, row))
+            return None
+
+    def get_nodes(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
+        if not names or not types or len(names) != len(types):
+            return []
+        keys = [k for k in self.KEYS_NODE if k != "id"]
+        pairs = list(zip(names, types))
+        placeholders = ",".join(["(?, ?)"] * len(pairs))
+        flat_params: List[Any] = []
+        for n, t in pairs:
+            flat_params.extend([n, t])
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute(f'''
+                SELECT name, type, description, source_id, filepath
+                FROM nodes
+                WHERE (name, type) IN ({placeholders});
+            ''', tuple(flat_params))
+            rows = cur.fetchall()
+            return [dict(zip(keys, row)) for row in rows] if rows else []
+
+    def delete_node(self, name: str, type: str) -> None:
+        with self.connect() as con:
+            con.execute('''
+                DELETE FROM nodes WHERE name = ? AND type = ?;
+            ''', (name, type))
+            con.commit()
+
+    def delete_nodes(self, names: List[str], types: List[str]) -> None:
+        if not names or not types or len(names) != len(types):
+            return
+        pairs = list(zip(names, types))
+        with self.connect() as con:
+            con.executemany('''
+                DELETE FROM nodes WHERE name = ? AND type = ?;
+            ''', pairs)
+            con.commit()
+
+    def update_node(self, name: str, type: str, updates: Dict[str, Any]) -> None:
+        if not updates:
+            return
+        allowed_keys = {"description", "source_id", "filepath"}
+        set_clauses = []
+        values = []
+        for k, v in updates.items():
+            if k in allowed_keys:
+                set_clauses.append(f"{k} = ?")
+                values.append(v)
+        if not set_clauses:
+            return
+        values.append(name)
+        values.append(type)
+        set_clause = ", ".join(set_clauses)
+        with self.connect() as con:
+            con.execute(f"UPDATE nodes SET {set_clause} WHERE name = ? AND type = ?;", values)
+            con.commit()
+
+    def update_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
+        if not updates_list:
+            return
+        for update in updates_list:
+            self.update_node(update["name"], update["type"], update)
+
+    # ---------------------------
+    # EDGE OPERATIONS
+    # ---------------------------    
     def add_edge(self, source_name: str, target_name: str, weight: Optional[float] = None,
                  description: Optional[str] = None, keywords: Optional[str] = None,
                  source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
@@ -291,6 +521,103 @@ class GraphDB:
                 (source_name, target_name, weight, description, keywords, source_id, filepath, u_source_name, u_target_name)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             ''', (source_name, target_name, weight, description, keywords, source_id, filepath, u_src, u_tgt))
+            con.commit()
+
+    def add_edges(self, edges: List[Dict[str, Any]]) -> None:
+        edges = [{**e, **dict(zip(("u_source_name", "u_target_name"), _normalize_pair(e["source_name"], e["target_name"])))} for e in edges]
+        with self.connect() as con:
+            con.executemany('''
+                INSERT OR IGNORE INTO edges
+                (source_name, target_name, weight, description, keywords, source_id, filepath, u_source_name, u_target_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ''', [(e["source_name"], e["target_name"], e.get("weight"), e.get("description"),
+                    e.get("keywords"), e.get("source_id"), e.get("filepath"),
+                    e["u_source_name"], e["u_target_name"]) for e in edges])
+            con.commit()
+
+    def get_edge(self, source_name: str, target_name: str) -> Optional[Dict[str, Any]]:
+        u_src, u_tgt = _normalize_pair(source_name, target_name)
+        keys = [k for k in self.KEYS_EDGE if k not in {"id", "u_source_name", "u_target_name"}]
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute('''
+                SELECT source_name, target_name, weight, description, keywords, source_id, filepath
+                FROM edges
+                WHERE u_source_name = ? AND u_target_name = ?;
+            ''', (u_src, u_tgt))
+            row = cur.fetchone()
+            if row:
+                return dict(zip(keys, row))
+            return None
+        
+    def get_edges(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+        if not pairs:
+            return []
+        pairs = [_normalize_pair(a, b) for a, b in pairs]
+        keys = [k for k in self.KEYS_EDGE if k not in {"id", "u_source_name", "u_target_name"}]
+        placeholders = ",".join(["(?, ?)"] * len(pairs))
+        flat_params: List[Any] = []
+        for u_src, u_tgt in pairs:
+            flat_params.extend([u_src, u_tgt])
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute(f'''
+                SELECT source_name, target_name, weight, description, keywords, source_id, filepath
+                FROM edges
+                WHERE (u_source_name, u_target_name) IN ({placeholders});
+            ''', tuple(flat_params))
+            rows = cur.fetchall()
+            return [dict(zip(keys, row)) for row in rows] if rows else []
+        
+    def delete_edge(self, source_name: str, target_name: str) -> None:
+        u_src, u_tgt = _normalize_pair(source_name, target_name)
+        with self.connect() as con:
+            con.execute('''
+                DELETE FROM edges WHERE u_source_name = ? AND u_target_name = ?;
+            ''', (u_src, u_tgt))
+            con.commit()
+
+    def delete_edges(self, pairs: List[Tuple[str, str]]) -> None:
+        if not pairs:
+            return
+        norm = [_normalize_pair(a, b) for a, b in pairs]
+        with self.connect() as con:
+            con.executemany('''
+                DELETE FROM edges WHERE u_source_name = ? AND u_target_name = ?;
+            ''', norm)
+            con.commit()
+
+    def update_edge(self, source_name: str, target_name: str, updates: Dict[str, Any]) -> None:
+        if not updates:
+            return
+        allowed_keys = {"weight", "description", "keywords", "source_id", "filepath"}
+        filtered = {k: v for k, v in updates.items() if k in allowed_keys}
+        if not filtered:
+            return
+        u_src, u_tgt = _normalize_pair(source_name, target_name)
+        set_clause = ', '.join(f"{k} = ?" for k in filtered.keys())
+        with self.connect() as con:
+            con.execute(f'''
+                UPDATE edges SET {set_clause} WHERE u_source_name = ? AND u_target_name = ?;
+            ''', (*filtered.values(), u_src, u_tgt))
+            con.commit()
+
+    def update_edges(self, updates_list: List[Dict[str, Any]]) -> None:
+        if not updates_list:
+            return
+        allowed_keys = {"weight", "description", "keywords", "source_id", "filepath"}
+        with self.connect() as con:
+            for u in updates_list:
+                src = u["source_name"]
+                tgt = u["target_name"]
+                filtered = {k: v for k, v in u.items() if k in allowed_keys}
+                if not filtered:
+                    continue
+                u_src, u_tgt = _normalize_pair(src, tgt)
+                set_clause = ', '.join(f"{k} = ?" for k in filtered.keys())
+                con.execute(f'''
+                    UPDATE edges SET {set_clause} WHERE u_source_name = ? AND u_target_name = ?;
+                ''', (*filtered.values(), u_src, u_tgt))
             con.commit()
 
 
@@ -311,6 +638,20 @@ class _ChromaBase:
         embeddings = self.embedder.embed_texts(texts)
         self.col.add(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
+    def _get(self, ids: List[str]) -> List[Dict[str, Any]]:
+        return self.col.get(ids=ids)
+
+    def _delete(self, ids: List[str]) -> None:
+        self.col.delete(ids=ids)
+
+    def _upsert(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]) -> None:
+        embeddings = self.embedder.embed_texts(texts)
+        self.col.upsert(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
+
+    def _query(self, texts: List[str], n_results: int, where: Optional[Dict[str, Any]] = None,
+               where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        embeddings = self.embedder.embed_texts(texts)
+        return self.col.query(embeddings=embeddings, n_results=n_results, where=where, where_document=where_document)
 
 class ChunkVectors(_ChromaBase):
     """
@@ -331,6 +672,28 @@ class ChunkVectors(_ChromaBase):
         } for c in chunks]
         self._add(ids, texts, metadatas)
 
+    def get(self, ids: List[str]) -> List[Dict[str, Any]]:
+        return self._get(ids=ids)
+
+    def delete(self, ids: List[str]) -> None:
+        self._delete(ids=ids)
+
+    def upsert(self, chunks: Sequence[Dict[str, Any]]) -> None:
+        ids = [c["chunk_uuid"] for c in chunks]
+        texts = [c.get("text", "") for c in chunks]
+        metadatas = [{
+            "doc_id": c.get("doc_id"),
+            "chunk_id": c.get("chunk_id"),
+            "filename": c.get("filename"),
+            "start_page": c.get("start_page"),
+            "end_page": c.get("end_page"),
+            "char_count": c.get("char_count"),
+        } for c in chunks]
+        self._upsert(ids=ids, texts=texts, metadatas=metadatas)
+
+    def query(self, text: str, n_results: int = 5, where: Optional[Dict[str, Any]] = None, 
+            where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        return self._query(texts=[text], n_results=n_results, where=where, where_document=where_document)
 
 class EntityVectors(_ChromaBase):
     """
@@ -363,6 +726,37 @@ class EntityVectors(_ChromaBase):
             })
         self._add(ids, texts, metas)
 
+    def get_entities(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
+        ids = [self._entity_id(name, etype) for name, etype in zip(names, types)]
+        return self._get(ids=ids)
+    
+    def delete_entities(self, names: List[str], types: List[str]) -> None:
+        ids = [self._entity_id(name, etype) for name, etype in zip(names, types)]
+        self._delete(ids=ids)
+
+    def upsert_entities(self, entities: Sequence[Dict[str, Any]]) -> None:
+        ids: List[str] = []
+        texts: List[str] = []
+        metas: List[Dict[str, Any]] = []
+        for e in entities:
+            name = e["name"]
+            etype = e["type"]
+            desc = e.get("description", "") or ""
+            ids.append(self._entity_id(name, etype))
+            # Embed name + type + description
+            texts.append(f"{name} [{etype}] {desc}")
+            metas.append({
+                "name": name,
+                "type": etype,
+                "description": desc,
+                "source_id": e.get("source_id"),
+                "filepath": e.get("filepath"),
+            })
+        self._upsert(ids, texts, metas)
+
+    def query(self, text: str, n_results: int = 5, where: Optional[Dict[str, Any]] = None,
+              where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        return self._query(texts=[text], n_results=n_results, where=where, where_document=where_document)
 
 class RelationVectors(_ChromaBase):
     """
@@ -399,6 +793,40 @@ class RelationVectors(_ChromaBase):
             })
         self._add(ids, texts, metas)
 
+    def get_relations(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+        ids = [self._edge_id(src, tgt) for src, tgt in pairs]
+        return self._get(ids=ids)
+
+    def delete_relations(self, pairs: List[Tuple[str, str]]) -> None:
+        ids = [self._edge_id(src, tgt) for src, tgt in pairs]
+        self._delete(ids=ids)
+
+    def upsert_relations(self, relations: Sequence[Dict[str, Any]]) -> None:
+        ids: List[str] = []
+        texts: List[str] = []
+        metas: List[Dict[str, Any]] = []
+        for r in relations:
+            src = r["source_name"]
+            tgt = r["target_name"]
+            desc = r.get("description", "") or ""
+            kw = r.get("keywords", "") or ""
+            ids.append(self._edge_id(src, tgt))
+            # Embed src + tgt + description + keywords
+            texts.append(f"{src} <-> {tgt} :: {desc} :: {kw}")
+            metas.append({
+                "source_name": src,
+                "target_name": tgt,
+                "weight": r.get("weight"),
+                "description": desc,
+                "keywords": kw,
+                "source_id": r.get("source_id"),
+                "filepath": r.get("filepath"),
+            })
+        self._upsert(ids, texts, metas)
+
+    def query(self, text: str, n_results: int = 5, where: Optional[Dict[str, Any]] = None,
+              where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        return self._query(texts=[text], n_results=n_results, where=where, where_document=where_document)
 
 # ---------------------------
 # Unified Storage Facade
@@ -456,11 +884,7 @@ class Storage:
     def add_chunks(self, chunks: Sequence[Dict[str, Any]]) -> None:
         self.chunks.add_chunks(chunks)
 
-    # 3) Chunk vectors
-    def add_chunk_vectors(self, chunks: Sequence[Dict[str, Any]]) -> None:
-        self.chunk_vectors.add_chunks(chunks)
-
-    # 4) Knowledge Graph schema
+    # 3) Knowledge Graph schema
     def add_kg_node(self, name: str, type: str, description: Optional[str] = None,
                     source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
         self.graph.add_node(name=name, type=type, description=description, source_id=source_id, filepath=filepath)
@@ -470,6 +894,11 @@ class Storage:
                     source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
         self.graph.add_edge(source_name=source_name, target_name=target_name, weight=weight,
                             description=description, keywords=keywords, source_id=source_id, filepath=filepath)
+
+    # 4) Chunk vectors
+    def add_chunk_vectors(self, chunks: Sequence[Dict[str, Any]]) -> None:
+        if chunks:
+            self.chunk_vectors.add_chunks(chunks)
 
     # 5) Entity vectors
     def add_entity_vectors(self, entities: Sequence[Dict[str, Any]]) -> None:
@@ -489,3 +918,129 @@ class Storage:
         """
         if relations:
             self.relation_vectors.add_relations(relations)
+
+    # ---------- Get-only APIs ----------
+
+    # 1) Documents
+    def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        return self.documents.get_document(doc_id)
+    
+    def get_document_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
+        return self.documents.get_document_by_filename(filename)
+    
+    def list_documents(self) -> List[Dict[str, Any]]:
+        return self.documents.list_documents()
+
+    # 2) Chunks
+    def get_chunks_by_doc_id(self, doc_id: str) -> List[Dict[str, Any]]:
+        return self.chunks.get_chunks_by_doc_id(doc_id)
+    
+    def get_chunks_by_filename(self, filename: str) -> List[Dict[str, Any]]:
+        return self.chunks.get_chunks_by_filename(filename)
+
+    def get_chunk_by_uuid(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
+        return self.chunks.get_chunk_by_uuid(chunk_uuid)
+
+    def get_chunks_by_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        return self.chunks.get_chunks_by_uuids(chunk_uuids)
+    
+    # 3) Graph
+    def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+        return self.graph.get_node(node_id)
+    
+    def get_nodes(self, node_ids: List[str]) -> List[Dict[str, Any]]:
+        return self.graph.get_nodes(node_ids)
+
+    def get_edge(self, edge_id: str) -> Optional[Dict[str, Any]]:
+        return self.graph.get_edge(edge_id)
+
+    def get_edges(self, edge_ids: List[str]) -> List[Dict[str, Any]]:
+        return self.graph.get_edges(edge_ids)
+
+    # 4) Chunk Vectors
+    def get_chunk_vector(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
+        return self.chunk_vectors.get([chunk_uuid])
+
+    # 5) Entity Vectors
+    def get_entities(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
+        return self.entity_vectors.get_entities(names, types)
+
+    # 6) Relation Vectors
+    def get_relations(self, pairs: List[Tuple[str, str]]) -> Optional[Dict[str, Any]]:
+        return self.relation_vectors.get_relations(pairs)
+
+    # ---------- Delete-only APIs ----------
+
+    # 1) Documents
+    def delete_document(self, doc_id: str) -> None:
+        self.documents.delete_document(doc_id)
+
+    # 2) Chunks
+    def delete_chunks_by_doc_id(self, doc_id: str) -> None:
+        self.chunks.delete_chunks_by_doc_id(doc_id)
+
+    def delete_chunk_by_uuid(self, chunk_uuid: str) -> None:
+        self.chunks.delete_chunk_by_uuid(chunk_uuid)
+
+    def delete_chunks_by_uuids(self, chunk_uuids: List[str]) -> None:
+        self.chunks.delete_chunks_by_uuids(chunk_uuids)
+
+    # 3) Graph
+    def delete_node(self, name: str, type: str) -> None:
+        self.graph.delete_node(name, type)
+
+    def delete_nodes(self, names: List[str], types: List[str]) -> None:
+        self.graph.delete_nodes(names, types)
+
+    def delete_edge(self, source_name: str, target_name: str) -> None:
+        self.graph.delete_edge(source_name, target_name)
+
+    def delete_edges(self, pairs: List[Tuple[str, str]]) -> None:
+        self.graph.delete_edges(pairs)
+
+    # 4) Chunk Vectors
+    def delete_chunk_vector(self, chunk_uuid: str) -> None:
+        self.chunk_vectors.delete([chunk_uuid])
+
+    # 5) Entity Vectors
+    def delete_entity_vector(self, names: List[str], types: List[str]) -> None:
+        self.entity_vectors.delete_entities(names, types)
+
+    # 6) Relation Vectors
+    def delete_relation_vector(self, pairs: List[Tuple[str, str]]) -> None:
+        self.relation_vectors.delete_relations(pairs)
+
+    # ---------- Update and Upsert APIs ----------
+
+    # 1) Documents
+    def upsert_document(self, doc_id: str, updates: Dict[str, Any]) -> None:
+        self.documents.update_document(doc_id, updates)
+
+    # 2) Chunks
+    def upsert_chunk(self, chunk_uuid: str, updates: Dict[str, Any]) -> None:
+        self.chunks.update_chunk(chunk_uuid, updates)
+
+    # 3) Graph
+    def upsert_node(self, node_id: str, updates: Dict[str, Any]) -> None:
+        self.graph.update_node(node_id, updates)
+
+    def upsert_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
+        self.graph.update_nodes(updates_list)
+
+    def upsert_edge(self, edge_id: str, updates: Dict[str, Any]) -> None:
+        self.graph.update_edge(edge_id, updates)
+
+    def upsert_edges(self, updates_list: List[Dict[str, Any]]) -> None:
+        self.graph.update_edges(updates_list)
+
+    # 4) Chunk Vectors
+    def upsert_chunk_vector(self, chunks: Sequence[Dict[str, Any]]) -> None:
+        self.chunk_vectors.upsert(chunks)
+
+    # 5) Entity Vectors
+    def upsert_entity_vector(self, entities: List[Dict[str, Any]]) -> None:
+        self.entity_vectors.upsert_entities(entities)
+
+    # 6) Relation Vectors
+    def upsert_relation_vector(self, relations: List[Dict[str, Any]]) -> None:
+        self.relation_vectors.upsert_relations(relations)

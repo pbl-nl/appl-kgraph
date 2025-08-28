@@ -341,8 +341,7 @@ class EntityVectors(_ChromaBase):
     """
     @staticmethod
     def _entity_id(name: str, type: str) -> str:
-        import uuid
-        return f"{name}::{type}::{uuid.uuid4()}"
+        return f"{name}::{type}"
 
     def add_entities(self, entities: Sequence[Dict[str, Any]]) -> None:
         ids: List[str] = []

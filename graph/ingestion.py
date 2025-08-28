@@ -1,11 +1,13 @@
 
 from __future__ import annotations
-import argparse, importlib.util, mimetypes, os, sys, uuid
+import argparse
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from storage import Storage
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
+from extractor import extract_from_chunks
 
 
 def parse_to_pages(filepath: Path):
@@ -51,10 +53,12 @@ def chunk_pages(pages: Tuple[int, str], meta_doc_id: str, filename: str):
 def ingest_paths(paths: List[Path], db_path: str, chroma_dir: str, collection: str):
     
 
-    storage = Storage(db_path=db_path, chroma_dir=chroma_dir, collection=collection)
+    storage = Storage()
     storage.init()
 
     all_chunks: List[Dict[str, Any]] = []
+    all_entities: List[Dict[str, Any]]  = []
+    all_relations: List[Dict[str, Any]]  = []
 
     for p in paths:
         if not p.exists() or not p.is_file():
@@ -66,12 +70,27 @@ def ingest_paths(paths: List[Path], db_path: str, chroma_dir: str, collection: s
         full_text = "\n".join([page[1] for page in pages])
         chunks = chunk_pages(pages, meta_doc_id=metadata["doc_id"], filename=metadata["filename"])
 
-        storage.upsert_document(metadata, full_text)
-        storage.upsert_chunks(chunks)
+        # Add document and chunks to storage
+        storage.add_document(metadata, full_text)
+        storage.add_chunks(chunks)
         all_chunks.extend(chunks)
 
+        # Extract entities and relations from chunks
+        # res['entities'], res['relationships'], res['content_keywords']
+        res = extract_from_chunks(chunks) 
+        for ent in res['entities']:
+            storage.add_kg_node(**ent)
+        for rel in res['relationships']:
+            storage.add_kg_edge(**rel)
+
+        all_entities.extend(res['entities'])
+        all_relations.extend(res['relationships'])
+
+    # Finally, add all chunks, entities, and relations to vector DB
     if all_chunks:
-        storage.add_chunks_to_vector(all_chunks)
+        storage.add_chunk_vectors(all_chunks)
+        storage.add_entity_vectors(all_entities)
+        storage.add_relation_vectors(all_relations)
 
 def main():
     ap = argparse.ArgumentParser()

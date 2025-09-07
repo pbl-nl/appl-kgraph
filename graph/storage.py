@@ -1,16 +1,54 @@
-
 from __future__ import annotations
 import os
+import re
 import sqlite3
-from typing import Dict, Any, Iterable, List, Optional, Sequence, Tuple
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
 from dotenv import load_dotenv
-from openai import AzureOpenAI
+
 import chromadb
+import openai
+from openai import AzureOpenAI
+
 
 load_dotenv()
 
+
+# --- Options & ID helpers ---
+DELIM = "::"
+ID_SAFE = re.compile(r"[^A-Za-z0-9_\-.]")  # deliberately NO colon to protect the DELIM
+
+@dataclass
+class StorageOptions:
+    directed_relations: bool = True  # True: A->B ≠ B->A; False: undirected (canonical)
+    id_delimiter: str = DELIM
+
+def _normalize_token(s: str) -> str:
+    # fold unicode to ASCII, drop unsafe chars, lowercase
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return ID_SAFE.sub("_", s).lower()
+
+def build_entity_mention_id(name: str, typ: str, doc_id: str, chunk_id: str, mention_idx: int, *, delim: str = DELIM) -> str:
+    parts = map(_normalize_token, (name, typ, doc_id, chunk_id, str(mention_idx)))
+    return "ent" + delim + delim.join(parts)
+
+def _edge_key(src: str, dst: str, *, directed: bool, delim: str = DELIM) -> str:
+    # canonical edge key for grouping/graph-level identity
+    a, b = (_normalize_token(src), _normalize_token(dst))
+    return (a + delim + b) if directed else delim.join(sorted((a, b)))
+
+def build_edge_mention_id(src: str, dst: str, doc_id: str, chunk_id: str, rel_idx: int, *, directed: bool, delim: str = DELIM) -> str:
+    # keep direction in the mention id when directed; canonicalize when undirected
+    if directed:
+        parts = map(_normalize_token, (src, dst, doc_id, chunk_id, str(rel_idx)))
+    else:
+        # canonicalize endpoints for undirected mode
+        s, t = sorted((_normalize_token(src), _normalize_token(dst)))
+        parts = (s, t, _normalize_token(doc_id), _normalize_token(chunk_id), str(rel_idx))
+    return "rel" + delim + delim.join(parts)
 
 # ---------------------------
 # Helpers
@@ -37,7 +75,7 @@ def _normalize_pair(a: str, b: str) -> Tuple[str, str]:
 # Embeddings
 # ---------------------------
 
-class AzureEmbedder:
+class LLMEmbedder:
     """
     Thin wrapper around Azure OpenAI embeddings.
     Expects environment variables:
@@ -47,18 +85,25 @@ class AzureEmbedder:
       - AZURE_OPENAI_EMB_DEPLOYMENT_NAME  (embedding deployment name)
     """
     def __init__(self):
-        if AzureOpenAI is None:  # type: ignore[truthy-bool]
-            raise RuntimeError("openai package not installed. pip install openai")
-        endpoint = _get_env("AZURE_OPENAI_ENDPOINT")
-        api_key = _get_env("AZURE_OPENAI_API_KEY")
-        api_version = _get_env("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-        if not endpoint or not api_key:
-            raise RuntimeError("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY")
-        self.model = _get_env("AZURE_OPENAI_EMB_DEPLOYMENT_NAME")
-        if not self.model:
-            raise RuntimeError("Set AZURE_OPENAI_EMB_DEPLOYMENT_NAME to your embeddings deployment name")
-        self.client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=endpoint)
-
+        use_azure = os.getenv("USE_AZURE_OPENAI", "true").lower() == "true"
+        if use_azure:
+            if AzureOpenAI is None:  # type: ignore[truthy-bool]
+                raise RuntimeError("openai package not installed. pip install openai")
+            endpoint = _get_env("AZURE_OPENAI_ENDPOINT")
+            api_key = _get_env("AZURE_OPENAI_API_KEY")
+            api_version = _get_env("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+            if not endpoint or not api_key:
+                raise RuntimeError("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY")
+            self.model = _get_env("AZURE_OPENAI_EMB_DEPLOYMENT_NAME")
+            if not self.model:
+                raise RuntimeError("Set AZURE_OPENAI_EMB_DEPLOYMENT_NAME to your embeddings deployment name")
+            self.client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=endpoint)
+        else:
+            api_key = _get_env("OPENAI_API_KEY")
+            model = _get_env("OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002")
+            self.model = model
+            self.client = openai.OpenAI(api_key=api_key)
+    
     def embed_texts(self, texts: Iterable[str], batch_size: int = 64) -> List[List[float]]:
         out: List[List[float]] = []
         batch: List[str] = []
@@ -104,7 +149,13 @@ class DocumentsDB:
     def connect(self):
         con = sqlite3.connect(self.db_path)
         try:
-            con.execute("PRAGMA foreign_keys = ON;")
+            # Safety + speed
+            con.execute("PRAGMA journal_mode=WAL;")
+            con.execute("PRAGMA synchronous=NORMAL;")
+            con.execute("PRAGMA temp_store=MEMORY;")
+            con.execute("PRAGMA cache_size=-20000;")   # ~20MB cache
+            con.execute("PRAGMA busy_timeout=5000;")   # wait for locks
+            con.execute("PRAGMA foreign_keys = ON;")   # Enable foreign key constraints
             yield con
         finally:
             con.close()
@@ -234,7 +285,13 @@ class ChunksDB:
     def connect(self):
         con = sqlite3.connect(self.db_path)
         try:
-            # No FK across DBs
+            # Safety + speed
+            con.execute("PRAGMA journal_mode=WAL;")
+            con.execute("PRAGMA synchronous=NORMAL;")
+            con.execute("PRAGMA temp_store=MEMORY;")
+            con.execute("PRAGMA cache_size=-20000;")   # ~20MB cache
+            con.execute("PRAGMA busy_timeout=5000;")   # wait for locks
+            con.execute("PRAGMA foreign_keys = ON;")   # Enable foreign key constraints
             yield con
         finally:
             con.close()
@@ -380,6 +437,13 @@ class GraphDB:
     def connect(self):
         con = sqlite3.connect(self.db_path)
         try:
+            # Safety + speed
+            con.execute("PRAGMA journal_mode=WAL;")
+            con.execute("PRAGMA synchronous=NORMAL;")
+            con.execute("PRAGMA temp_store=MEMORY;")
+            con.execute("PRAGMA cache_size=-20000;")   # ~20MB cache
+            con.execute("PRAGMA busy_timeout=5000;")   # wait for locks
+            con.execute("PRAGMA foreign_keys = ON;")   # Enable foreign key constraints
             yield con
         finally:
             con.close()
@@ -626,13 +690,13 @@ class GraphDB:
 # ---------------------------
 
 class _ChromaBase:
-    def __init__(self, collection: str, chroma_dir: str, embedder: Optional[AzureEmbedder] = None):
+    def __init__(self, collection: str, chroma_dir: str, embedder: Optional[LLMEmbedder] = None):
         if chromadb is None:
             raise RuntimeError("chromadb not installed. pip install chromadb")
         _ensure_dir_for(os.path.join(chroma_dir, ".sentinel"))
         self.client = chromadb.PersistentClient(path=chroma_dir)  # type: ignore
         self.col = self.client.get_or_create_collection(name=collection, metadata={"hnsw:space": "cosine"})
-        self.embedder = embedder or AzureEmbedder()
+        self.embedder = embedder or LLMEmbedder()
 
     def _add(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]):
         embeddings = self.embedder.embed_texts(texts)
@@ -828,6 +892,18 @@ class RelationVectors(_ChromaBase):
               where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         return self._query(texts=[text], n_results=n_results, where=where, where_document=where_document)
 
+# storage.py — add after _ChromaBase and the other *Vectors classes
+class MentionVectors(_ChromaBase):
+    """
+    Vector DB for individual mentions (entity or relation sightings in a chunk).
+    We store one vector per mention with a stable mention_id.
+    """
+    def upsert(self, ids, texts, metas, embeddings=None):
+        if embeddings is None:
+            self._upsert(ids=ids, texts=texts, metadatas=metas)
+        else:
+            self.col.upsert(ids=ids, documents=texts, embeddings=embeddings, metadatas=metas)
+
 # ---------------------------
 # Unified Storage Facade
 # ---------------------------
@@ -840,6 +916,7 @@ class StoragePaths:
     chroma_chunks: str = "./storage/chroma_chunks"
     chroma_entities: str = "./storage/chroma_entities"
     chroma_relations: str = "./storage/chroma_relations"
+    chroma_mentions: str = "./storage/chroma_mentions"
 
 
 class Storage:
@@ -854,19 +931,21 @@ class Storage:
 
     Only 'add' operations are implemented for now.
     """
-
-    def __init__(self, paths: Optional[StoragePaths] = None, embedder: Optional[AzureEmbedder] = None):
-        paths = paths or StoragePaths()
+    def __init__(self, paths: "StoragePaths" = None, options: Optional[StorageOptions] = None):
+        self.paths = paths or StoragePaths()
+        self.options = options or StorageOptions()
 
         # Schema DBs
-        self.documents = DocumentsDB(paths.documents_db)
-        self.chunks = ChunksDB(paths.chunks_db)
-        self.graph = GraphDB(paths.graph_db)
+        self.documents = DocumentsDB(self.paths.documents_db)
+        self.chunks = ChunksDB(self.paths.chunks_db)
+        self.graph = GraphDB(self.paths.graph_db)
 
         # Vector DBs (each in its own persistent directory => separate DBs)
-        self.chunk_vectors = ChunkVectors(collection="chunks", chroma_dir=paths.chroma_chunks, embedder=embedder)
-        self.entity_vectors = EntityVectors(collection="entities", chroma_dir=paths.chroma_entities, embedder=embedder)
-        self.relation_vectors = RelationVectors(collection="relations", chroma_dir=paths.chroma_relations, embedder=embedder)
+        embedder = LLMEmbedder() # default embedder; can be customized per *Vectors class if needed
+        self.chunk_vectors    = ChunkVectors(collection="chunks",    chroma_dir=self.paths.chroma_chunks,    embedder=embedder)
+        self.entity_vectors   = EntityVectors(collection="entities", chroma_dir=self.paths.chroma_entities,  embedder=embedder)
+        self.relation_vectors = RelationVectors(collection="relations", chroma_dir=self.paths.chroma_relations, embedder=embedder)
+        self.mention_vectors  = MentionVectors(collection="mentions", chroma_dir=self.paths.chroma_mentions, embedder=embedder)  # NEW
 
     def init(self):
         """Create tables/collections if they don't exist yet."""
@@ -901,23 +980,82 @@ class Storage:
             self.chunk_vectors.add_chunks(chunks)
 
     # 5) Entity vectors
-    def add_entity_vectors(self, entities: Sequence[Dict[str, Any]]) -> None:
-        """
-        Each entity dict must include: name, type; optional: description, source_id, filepath
-        Uniqueness enforced via Chroma IDs "name::type".
-        """
-        if entities:
-            self.entity_vectors.add_entities(entities)
+    # --- Vector: Entity mention ---
+    def add_entity_mention_vector(
+        self,
+        *,
+        name: str,
+        typ: str,
+        text: str,
+        doc_id: str,
+        chunk_id: str,
+        mention_idx: int,
+        page: Optional[int] = None,
+        embedding: Optional[List[float]] = None,
+        extra_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        mention_id = build_entity_mention_id(name, typ, doc_id, chunk_id, mention_idx, delim=self.options.id_delimiter)
+        meta: Dict[str, Any] = {
+            "kind": "entity_mention",
+            "entity_id": _normalize_token(name) + self.options.id_delimiter + _normalize_token(typ),
+            "name": name,
+            "type": typ,
+            "doc_id": doc_id,
+            "chunk_id": chunk_id,
+            "page": page,
+        }
+        if extra_meta:
+            meta.update(extra_meta)
 
-    # 6) Relation vectors
-    def add_relation_vectors(self, relations: Sequence[Dict[str, Any]]) -> None:
-        """
-        Each relation dict must include: source_name, target_name;
-        optional: weight, description, keywords, source_id, filepath.
-        Uniqueness enforced via normalized ID "min::max".
-        """
-        if relations:
-            self.relation_vectors.add_relations(relations)
+        self.mention_vectors.upsert(
+            ids=[mention_id],
+            texts=[text or ""],
+            metas=[meta],
+            embeddings=[embedding] if embedding is not None else None,
+        )
+
+    # --- Vector: Relation mention ---
+    def add_edge_mention_vector(
+        self,
+        *,
+        src: str,
+        dst: str,
+        text: str,
+        doc_id: str,
+        chunk_id: str,
+        rel_idx: int,
+        page: Optional[int] = None,
+        embedding: Optional[List[float]] = None,
+        extra_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        directed = self.options.directed_relations
+        mention_id = build_edge_mention_id(src, dst, doc_id, chunk_id, rel_idx, directed=directed, delim=self.options.id_delimiter)
+        edge_id = _edge_key(src, dst, directed=directed, delim=self.options.id_delimiter)
+
+        # normalize source/target for metadata if undirected
+        if directed:
+            src_meta, dst_meta = src, dst
+        else:
+            src_meta, dst_meta = sorted((_normalize_token(src), _normalize_token(dst)))
+
+        meta: Dict[str, Any] = {
+            "kind": "edge_mention",
+            "edge_id": edge_id,
+            "source": src_meta,
+            "target": dst_meta,
+            "doc_id": doc_id,
+            "chunk_id": chunk_id,
+            "page": page,
+        }
+        if extra_meta:
+            meta.update(extra_meta)
+
+        self.mention_vectors.upsert(
+            ids=[mention_id],
+            texts=[text or ""],
+            metas=[meta],
+            embeddings=[embedding] if embedding is not None else None,
+        )
 
     # ---------- Get-only APIs ----------
 
@@ -945,17 +1083,26 @@ class Storage:
         return self.chunks.get_chunks_by_uuids(chunk_uuids)
     
     # 3) Graph
-    def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
-        return self.graph.get_node(node_id)
-    
-    def get_nodes(self, node_ids: List[str]) -> List[Dict[str, Any]]:
-        return self.graph.get_nodes(node_ids)
+    def get_node(self, name: str, type: str):
+        """Fetch a single node by (name, type)."""
+        return self.graph.get_node(name, type)
 
-    def get_edge(self, edge_id: str) -> Optional[Dict[str, Any]]:
-        return self.graph.get_edge(edge_id)
+    def get_nodes(self, pairs: List[Tuple[str, str]]):
+        """Fetch multiple nodes; input as [(name, type), ...]."""
+        if not pairs:
+            return []
+        names, types = zip(*pairs)
+        return self.graph.get_nodes(list(names), list(types))
 
-    def get_edges(self, edge_ids: List[str]) -> List[Dict[str, Any]]:
-        return self.graph.get_edges(edge_ids)
+    def get_edge(self, source_name: str, target_name: str):
+        """Fetch a single edge by (source, target)."""
+        return self.graph.get_edge(source_name, target_name)
+
+    def get_edges(self, pairs: List[Tuple[str, str]]):
+        """Fetch multiple edges; input as [(source, target), ...]."""
+        if not pairs:
+            return []
+        return self.graph.get_edges(pairs)
 
     # 4) Chunk Vectors
     def get_chunk_vector(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
@@ -1021,16 +1168,31 @@ class Storage:
         self.chunks.update_chunk(chunk_uuid, updates)
 
     # 3) Graph
-    def upsert_node(self, node_id: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_node(node_id, updates)
+    def upsert_node(self, name: str, type: str, updates: Dict[str, Any]) -> None:
+        """
+        Update a single node identified by (name, type).
+        'updates' may include: description, source_id, filepath.
+        """
+        self.graph.update_node(name, type, updates)
 
     def upsert_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
+        """
+        Batch update nodes. Each dict MUST include 'name' and 'type' keys,
+        plus any updatable fields (description, source_id, filepath).
+        """
         self.graph.update_nodes(updates_list)
 
-    def upsert_edge(self, edge_id: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_edge(edge_id, updates)
+    def upsert_edge(self, source_name: str, target_name: str, updates: Dict[str, Any]) -> None:
+        """Update a single edge identified by (source, target)."""
+        if not self.options.directed_relations:
+            source_name, target_name = sorted((source_name, target_name))
+        self.graph.update_edge(source_name, target_name, updates)
 
     def upsert_edges(self, updates_list: List[Dict[str, Any]]) -> None:
+        """
+        Batch update edges. Each dict MUST include 'source_name' and 'target_name',
+        plus any updatable fields (weight, description, keywords, source_id, filepath).
+        """
         self.graph.update_edges(updates_list)
 
     # 4) Chunk Vectors

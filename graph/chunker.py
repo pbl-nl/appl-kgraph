@@ -36,10 +36,10 @@ Each item in `chunks` is a dict:
     }
 """
 from __future__ import annotations
-
 import re
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any, Iterable
+from typing import Any, Dict, Iterable, List, Tuple
+
 
 
 # Avoid variable-width lookbehind (unsupported by Python's 're').

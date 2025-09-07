@@ -1,0 +1,10 @@
+python-dotenv>=1.0.1	# env variables live here
+openai>=1.40.0        # AzureOpenAI and regular OpenAI live here
+chromadb>=0.5.4		#DB storage base
+pymupdf>=1.24.0       # import fitz
+langchain-community>=0.2.11 
+langdetect>=1.0.9	# Language detection
+beautifulsoup4>=4.12.3	# Parsing HTML
+lxml>=5.2.2           # bs4 XML parser (BSHTMLLoader bs_kwargs)
+docx2pdf>=0.1.8       # when re-enabling docx parsing
+

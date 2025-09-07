@@ -1,11 +1,22 @@
 from __future__ import annotations
-
+import json
 import os
 import re
-import json
 from dataclasses import dataclass
-from dotenv import load_dotenv
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from dotenv import load_dotenv
+
+try:
+    import openai
+    from openai import AzureOpenAI
+except Exception:
+    openai = None
+    AzureOpenAI = None
+
+from prompts import PROMPTS
+
 load_dotenv()
 # ─────────────────────────────────────────────────────────────
 # Load prompt templates from your uploaded prompts.py
@@ -22,49 +33,58 @@ except Exception as e:  # pragma: no cover
 #     - AZURE_OPENAI_API_KEY
 #     - AZURE_OPENAI_CHAT_DEPLOYMENT_NAME   (the chat model deployment name)
 #     - AZURE_OPENAI_API_VERSION            (optional, defaults to 2024-02-15-preview)
-# ─────────────────────────────────────────────────────────────
-try:
-    from openai import AzureOpenAI  # type: ignore
-except Exception:
-    AzureOpenAI = None  # type: ignore
 
+# If you want to use OpenAI instead of Azure OpenAI, set USE_AZURE_OPENAI=false in .env
+# Instead, the following env vars are used:
+#     - OPENAI_API_KEY
+#     - OPENAI_MODEL_NAME                   (optional, defaults to gpt-3.5-turbo)
+# ─────────────────────────────────────────────────────────────
 
 @dataclass
 class AzureConfig:
-    endpoint: str
-    api_key: str
+    endpoint: str = ""
+    api_key: str = ""
     api_version: str = "2024-02-15-preview"
-    chat_deployment: Optional[str] = None  # AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+    chat_deployment: Optional[str] = None
+    use_azure: bool = True
+    openai_model: Optional[str] = None
 
-
-class AzureChat:
+class LLMChat:
     def __init__(self, cfg: Optional[AzureConfig] = None):
-        if AzureOpenAI is None:
-            raise RuntimeError("openai package not installed. pip install openai")
+        use_azure = os.getenv("USE_AZURE_OPENAI", "true").lower() == "true"
+        if use_azure:
+            if AzureOpenAI is None:
+                raise RuntimeError("openai package not installed. pip install openai")
 
-        if cfg is None:
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            api_version = os.getenv("AZURE_OPENAI_API_VERSION")
-            chat_deployment = os.getenv("AZURE_OPENAI_LLM_DEPLOYMENT_NAME")
-            if not endpoint or not api_key or not chat_deployment:
-                raise RuntimeError(
-                    "Missing Azure env vars. Set AZURE_OPENAI_ENDPOINT, "
-                    "AZURE_OPENAI_API_KEY, AZURE_OPENAI_LLM_DEPLOYMENT_NAME"
+            if cfg is None:
+                endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+                api_key = os.getenv("AZURE_OPENAI_API_KEY")
+                api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+                chat_deployment = os.getenv("AZURE_OPENAI_LLM_DEPLOYMENT_NAME")
+                if not endpoint or not api_key or not chat_deployment:
+                    raise RuntimeError(
+                        "Missing Azure env vars. Set AZURE_OPENAI_ENDPOINT, "
+                        "AZURE_OPENAI_API_KEY, AZURE_OPENAI_LLM_DEPLOYMENT_NAME"
+                    )
+                cfg = AzureConfig(
+                    endpoint=endpoint,
+                    api_key=api_key,
+                    api_version=api_version,
+                    chat_deployment=chat_deployment,
                 )
-            cfg = AzureConfig(
-                endpoint=endpoint,
-                api_key=api_key,
-                api_version=api_version,
-                chat_deployment=chat_deployment,
+            self.cfg = cfg
+        
+            self.client = AzureOpenAI(
+                api_key=cfg.api_key,
+                api_version=cfg.api_version,
+                azure_endpoint=cfg.endpoint,
             )
-        self.cfg = cfg
-        self.client = AzureOpenAI(
-            api_key=cfg.api_key,
-            api_version=cfg.api_version,
-            azure_endpoint=cfg.endpoint,
-        )
-
+            self.model = cfg.chat_deployment
+        else:
+            api_key = os.getenv("OPENAI_API_KEY")
+            model = os.getenv("OPENAI_MODEL_NAME", "gpt-3.5-turbo")
+            self.client = openai.OpenAI(api_key=api_key)
+            self.model = model
     def generate(
         self,
         prompt: str,
@@ -78,13 +98,12 @@ class AzureChat:
         messages.append({"role": "user", "content": prompt})
 
         resp = self.client.chat.completions.create(
-            model=self.cfg.chat_deployment,
+            model=self.model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
         return resp.choices[0].message.content or ""
-
 
 # ─────────────────────────────────────────────────────────────
 # Prompt Builder
@@ -262,7 +281,7 @@ def _require_chunk_uuid(chunk: Dict[str, Any]) -> str:
 
 def extract_entities_relations_for_chunk(
     chunk: Dict[str, Any],
-    client: AzureChat,
+    client: LLMChat,
     language: Optional[str] = None,
     entity_types: Optional[Iterable[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
@@ -297,26 +316,41 @@ def extract_from_chunks(
     chunks: Iterable[Dict[str, Any]],
     language: Optional[str] = None,
     entity_types: Optional[Iterable[str]] = None,
-    client: Optional[AzureChat] = None,
+    client: Optional[LLMChat] = None,
+    max_workers: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    High-level convenience: iterate chunks, call LLM, parse, and return collected results.
-    Returns dict with 'entities', 'relationships', 'content_keywords'.
+    Parallel chunk extraction. Extracts entities, relationships, and keywords.
     """
     if client is None:
-        client = AzureChat()  # read env
+        client = LLMChat()  # read env
+
+    # default concurrency is conservative; override by env
+    if max_workers is None:
+        max_workers = int(os.getenv("EXTRACT_CONCURRENCY", "4"))
 
     all_entities: List[Dict[str, Any]] = []
     all_relationships: List[Dict[str, Any]] = []
     all_keywords: List[str] = []
 
-    for ch in chunks:
-        ents, rels, kws = extract_entities_relations_for_chunk(
+    # materialize iterable once (to allow multiple passes)
+    chunk_list = list(chunks)
+    if not chunk_list:
+        return {"entities": [], "relationships": [], "content_keywords": []}
+
+    def _work(ch):
+        return extract_entities_relations_for_chunk(
             ch, client=client, language=language, entity_types=entity_types
         )
-        all_entities.extend(ents)
-        all_relationships.extend(rels)
-        all_keywords.extend(kws)
+
+    # Run requests concurrently; merge results as they arrive.
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_work, ch) for ch in chunk_list]
+        for fut in as_completed(futures):
+            ents, rels, kws = fut.result()
+            all_entities.extend(ents)
+            all_relationships.extend(rels)
+            all_keywords.extend(kws)
 
     return {
         "entities": all_entities,
@@ -389,7 +423,7 @@ if __name__ == "__main__":
 
     chunks = _default_demo_chunks() if not args.chunks else _load_chunks_from_path(args.chunks)
 
-    client = AzureChat()  # reads env
+    client = LLMChat()  # reads env
     result = extract_from_chunks(chunks, language=language, entity_types=entity_types, client=client)
 
     # Pretty print

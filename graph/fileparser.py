@@ -1,15 +1,18 @@
+from __future__ import annotations
+
 import os
 import re
 import uuid
-import fitz
 import mimetypes
+import warnings
+import fitz  # PyMuPDF
 from pathlib import Path
+from typing import Any, Dict, List, Tuple, Union
+from bs4 import XMLParsedAsHTMLWarning
 from docx2pdf import convert
-from typing import List, Tuple, Dict, Any, Union
-from langchain_community.document_loaders import BSHTMLLoader
-from langchain_community.document_loaders import TextLoader
-import utils as ut
+from langchain_community.document_loaders import BSHTMLLoader, TextLoader
 
+import utils as ut
 
 class FileParser:
     """
@@ -94,20 +97,30 @@ class FileParser:
         pages = [(1, raw_text)]
         # extract metadata
         metadata = {}
-        metadata['Language'] = ut.detect_language(raw_text)
+        metadata['language'] = ut.detect_language(raw_text)
 
         return pages, metadata
     
     def _parse_html_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
-        """Parse HTML files"""
-        loader = BSHTMLLoader(filepath, open_encoding='utf-8')
-        data = loader.load()
+        """Parse HTML files (behavior-preserving, but faster and warning-free)."""
+        # Use the lxml backend for speed + proper XML handling; silence bs4 warning.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+            loader = BSHTMLLoader(
+                filepath,
+                open_encoding='utf-8',
+                bs_kwargs={"features": "lxml"}  # key: switch parser backend only
+            )
+            data = loader.load()
+
         raw_text = data[0].page_content.replace('\n', '')
         pages = [(1, raw_text)]
-        metadata = {}
-        metadata['Language'] = ut.detect_language(raw_text)
+
+        metadata: Dict[str, Any] = {}
+        metadata['Language'] = ut.detect_language(raw_text)  # same key + behavior
 
         return pages, metadata
+    
     
     def _parse_pdf_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """Parse PDF files"""

@@ -8,7 +8,7 @@ from docx2pdf import convert
 from typing import List, Tuple, Dict, Any, Union
 from langchain_community.document_loaders import BSHTMLLoader
 from langchain_community.document_loaders import TextLoader
-import utils as ut
+import graph.utils as ut
 
 
 class FileParser:

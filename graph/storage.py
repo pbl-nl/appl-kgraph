@@ -367,7 +367,7 @@ class ChunksDB:
 class GraphDB:
     """
     Separate SQLite database for the knowledge graph schema (nodes & edges).
-    - Nodes unique on (name, type)
+    - Nodes unique on (name)
     - Edges unique on undirected pair (source_name, target_name), stored canonically as (u_source_name, u_target_name)
     """
     def __init__(self, db_path: str = "graph.sqlite"):
@@ -395,7 +395,7 @@ class GraphDB:
                 description TEXT,
                 source_id TEXT,
                 filepath TEXT,
-                UNIQUE(name, type)
+                UNIQUE(name)
             );''')
 
             # Store canonicalized pair to enforce undirected uniqueness
@@ -435,55 +435,50 @@ class GraphDB:
             ''', [(n['name'], n['type'], n.get('description'), n.get('source_id'), n.get('filepath')) for n in nodes])
             con.commit()
 
-    def get_node(self, name: str, type: str) -> Optional[Dict[str, Any]]:
+    def get_node(self, name: str) -> Optional[Dict[str, Any]]:
         keys = [k for k in self.KEYS_NODE if k != "id"]
         with self.connect() as con:
             cur = con.cursor()
             cur.execute('''
-                SELECT name, type, description, source_id, filepath FROM nodes WHERE name = ? AND type = ?;
-            ''', (name, type))
+                SELECT name, type, description, source_id, filepath FROM nodes WHERE name = ?;
+            ''', (name,))
             row = cur.fetchone()
             if row:
                 return dict(zip(keys, row))
             return None
 
-    def get_nodes(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
-        if not names or not types or len(names) != len(types):
+    def get_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
+        if not names:
             return []
         keys = [k for k in self.KEYS_NODE if k != "id"]
-        pairs = list(zip(names, types))
-        placeholders = ",".join(["(?, ?)"] * len(pairs))
-        flat_params: List[Any] = []
-        for n, t in pairs:
-            flat_params.extend([n, t])
+        placeholders = ",".join(["?"] * len(names))
         with self.connect() as con:
             cur = con.cursor()
             cur.execute(f'''
                 SELECT name, type, description, source_id, filepath
                 FROM nodes
-                WHERE (name, type) IN ({placeholders});
-            ''', tuple(flat_params))
+                WHERE name IN ({placeholders});
+            ''', tuple(names))
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
 
-    def delete_node(self, name: str, type: str) -> None:
+    def delete_node(self, name: str) -> None:
         with self.connect() as con:
             con.execute('''
-                DELETE FROM nodes WHERE name = ? AND type = ?;
-            ''', (name, type))
+                DELETE FROM nodes WHERE name = ?;
+            ''', (name,))
             con.commit()
 
-    def delete_nodes(self, names: List[str], types: List[str]) -> None:
-        if not names or not types or len(names) != len(types):
+    def delete_nodes(self, names: List[str]) -> None:
+        if not names:
             return
-        pairs = list(zip(names, types))
         with self.connect() as con:
             con.executemany('''
-                DELETE FROM nodes WHERE name = ? AND type = ?;
-            ''', pairs)
+                DELETE FROM nodes WHERE name = ?;
+            ''', [(name,) for name in names])
             con.commit()
 
-    def update_node(self, name: str, type: str, updates: Dict[str, Any]) -> None:
+    def update_node(self, name: str, updates: Dict[str, Any]) -> None:
         if not updates:
             return
         allowed_keys = {"description", "source_id", "filepath"}
@@ -496,21 +491,20 @@ class GraphDB:
         if not set_clauses:
             return
         values.append(name)
-        values.append(type)
         set_clause = ", ".join(set_clauses)
         with self.connect() as con:
-            con.execute(f"UPDATE nodes SET {set_clause} WHERE name = ? AND type = ?;", values)
+            con.execute(f"UPDATE nodes SET {set_clause} WHERE name = ?;", values)
             con.commit()
 
     def update_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
         if not updates_list:
             return
         for update in updates_list:
-            self.update_node(update["name"], update["type"], update)
+            self.update_node(update["name"], update)
 
     # ---------------------------
     # EDGE OPERATIONS
-    # ---------------------------    
+    # ---------------------------
     def add_edge(self, source_name: str, target_name: str, weight: Optional[float] = None,
                  description: Optional[str] = None, keywords: Optional[str] = None,
                  source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
@@ -636,10 +630,12 @@ class _ChromaBase:
 
     def _add(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]):
         embeddings = self.embedder.embed_texts(texts)
+        metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]  # Chroma does not allow None values in metadata
         self.col.add(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def _get(self, ids: List[str]) -> List[Dict[str, Any]]:
-        return self.col.get(ids=ids)
+        res = self.col.get(ids=ids, include=["documents", "metadatas"])
+        return self.to_list(res)
 
     def _delete(self, ids: List[str]) -> None:
         self.col.delete(ids=ids)
@@ -651,7 +647,21 @@ class _ChromaBase:
     def _query(self, texts: List[str], n_results: int, where: Optional[Dict[str, Any]] = None,
                where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         embeddings = self.embedder.embed_texts(texts)
-        return self.col.query(embeddings=embeddings, n_results=n_results, where=where, where_document=where_document)
+        res = self.col.query(embeddings=embeddings, n_results=n_results, where=where, 
+                             where_document=where_document, include=["documents", "metadatas", "distances"])
+        return self.to_list(res)
+
+    @staticmethod
+    def to_list(results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not results:
+            return []
+        
+        num_items = len(next(iter(results.values())))
+        return [
+            {key: values[i] if isinstance(values, list) else values for key, values in results.items()}
+            for i in range(num_items)
+        ]
+
 
 class ChunkVectors(_ChromaBase):
     """
@@ -698,13 +708,10 @@ class ChunkVectors(_ChromaBase):
 class EntityVectors(_ChromaBase):
     """
     Vector DB for entities.
-    Uniqueness: (name, type) -> id "name::type"
+    Uniqueness: (name) -> id 
     metadatas:
       - name, type, description, source_id, filepath
     """
-    @staticmethod
-    def _entity_id(name: str, type: str) -> str:
-        return f"{name}::{type}"
 
     def add_entities(self, entities: Sequence[Dict[str, Any]]) -> None:
         ids: List[str] = []
@@ -714,7 +721,7 @@ class EntityVectors(_ChromaBase):
             name = e["name"]
             etype = e["type"]
             desc = e.get("description", "") or ""
-            ids.append(self._entity_id(name, etype))
+            ids.append(name)
             # Embed name + type + description
             texts.append(f"{name} [{etype}] {desc}")
             metas.append({
@@ -726,13 +733,11 @@ class EntityVectors(_ChromaBase):
             })
         self._add(ids, texts, metas)
 
-    def get_entities(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
-        ids = [self._entity_id(name, etype) for name, etype in zip(names, types)]
-        return self._get(ids=ids)
-    
-    def delete_entities(self, names: List[str], types: List[str]) -> None:
-        ids = [self._entity_id(name, etype) for name, etype in zip(names, types)]
-        self._delete(ids=ids)
+    def get_entities(self, names: List[str]) -> List[Dict[str, Any]]:
+        return self._get(ids=names)
+
+    def delete_entities(self, names: List[str]) -> None:
+        self._delete(ids=names)
 
     def upsert_entities(self, entities: Sequence[Dict[str, Any]]) -> None:
         ids: List[str] = []
@@ -742,7 +747,7 @@ class EntityVectors(_ChromaBase):
             name = e["name"]
             etype = e["type"]
             desc = e.get("description", "") or ""
-            ids.append(self._entity_id(name, etype))
+            ids.append(name)
             # Embed name + type + description
             texts.append(f"{name} [{etype}] {desc}")
             metas.append({
@@ -885,15 +890,11 @@ class Storage:
         self.chunks.add_chunks(chunks)
 
     # 3) Knowledge Graph schema
-    def add_kg_node(self, name: str, type: str, description: Optional[str] = None,
-                    source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
-        self.graph.add_node(name=name, type=type, description=description, source_id=source_id, filepath=filepath)
+    def add_kg_nodes(self, nodes: List[Dict[str, Any]]) -> None:
+        self.graph.add_nodes(nodes)
 
-    def add_kg_edge(self, source_name: str, target_name: str, weight: Optional[float] = None,
-                    description: Optional[str] = None, keywords: Optional[str] = None,
-                    source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
-        self.graph.add_edge(source_name=source_name, target_name=target_name, weight=weight,
-                            description=description, keywords=keywords, source_id=source_id, filepath=filepath)
+    def add_kg_edges(self, edges: List[Dict[str, Any]]) -> None:
+        self.graph.add_edges(edges)
 
     # 4) Chunk vectors
     def add_chunk_vectors(self, chunks: Sequence[Dict[str, Any]]) -> None:
@@ -938,32 +939,32 @@ class Storage:
     def get_chunks_by_filename(self, filename: str) -> List[Dict[str, Any]]:
         return self.chunks.get_chunks_by_filename(filename)
 
-    def get_chunk_by_uuid(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
+    def get_chunk_by_uuid(self, chunk_uuid: str) -> List[Dict[str, Any]]:
         return self.chunks.get_chunk_by_uuid(chunk_uuid)
 
     def get_chunks_by_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
         return self.chunks.get_chunks_by_uuids(chunk_uuids)
     
     # 3) Graph
-    def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
-        return self.graph.get_node(node_id)
-    
-    def get_nodes(self, node_ids: List[str]) -> List[Dict[str, Any]]:
-        return self.graph.get_nodes(node_ids)
+    def get_node(self, name: str) -> Optional[Dict[str, Any]]:
+        return self.graph.get_node(name)
 
-    def get_edge(self, edge_id: str) -> Optional[Dict[str, Any]]:
-        return self.graph.get_edge(edge_id)
+    def get_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
+        return self.graph.get_nodes(names)
 
-    def get_edges(self, edge_ids: List[str]) -> List[Dict[str, Any]]:
-        return self.graph.get_edges(edge_ids)
+    def get_edge(self, source_name: str, target_name: str) -> Optional[Dict[str, Any]]:
+        return self.graph.get_edge(source_name, target_name)
+
+    def get_edges(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+        return self.graph.get_edges(pairs)
 
     # 4) Chunk Vectors
     def get_chunk_vector(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
         return self.chunk_vectors.get([chunk_uuid])
 
     # 5) Entity Vectors
-    def get_entities(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
-        return self.entity_vectors.get_entities(names, types)
+    def get_entities(self, names: List[str]) -> List[Dict[str, Any]]:
+        return self.entity_vectors.get_entities(names)
 
     # 6) Relation Vectors
     def get_relations(self, pairs: List[Tuple[str, str]]) -> Optional[Dict[str, Any]]:
@@ -986,11 +987,11 @@ class Storage:
         self.chunks.delete_chunks_by_uuids(chunk_uuids)
 
     # 3) Graph
-    def delete_node(self, name: str, type: str) -> None:
-        self.graph.delete_node(name, type)
+    def delete_node(self, name: str) -> None:
+        self.graph.delete_node(name)
 
-    def delete_nodes(self, names: List[str], types: List[str]) -> None:
-        self.graph.delete_nodes(names, types)
+    def delete_nodes(self, names: List[str]) -> None:
+        self.graph.delete_nodes(names)
 
     def delete_edge(self, source_name: str, target_name: str) -> None:
         self.graph.delete_edge(source_name, target_name)
@@ -1003,8 +1004,8 @@ class Storage:
         self.chunk_vectors.delete([chunk_uuid])
 
     # 5) Entity Vectors
-    def delete_entity_vector(self, names: List[str], types: List[str]) -> None:
-        self.entity_vectors.delete_entities(names, types)
+    def delete_entity_vector(self, names: List[str]) -> None:
+        self.entity_vectors.delete_entities(names)
 
     # 6) Relation Vectors
     def delete_relation_vector(self, pairs: List[Tuple[str, str]]) -> None:
@@ -1021,17 +1022,39 @@ class Storage:
         self.chunks.update_chunk(chunk_uuid, updates)
 
     # 3) Graph
-    def upsert_node(self, node_id: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_node(node_id, updates)
+    def upsert_node(self, name: str, updates: Dict[str, Any]) -> None:
+        self.graph.update_node(name, updates)
 
     def upsert_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
-        self.graph.update_nodes(updates_list)
+        to_add = []
+        to_update = []
+        for upd in updates_list:
+            existing = self.graph.get_node(upd["name"])
+            if existing is None:
+                to_add.append(upd)
+            else:
+                to_update.append(upd)
+        if to_add:
+            self.graph.add_nodes(to_add)
+        if to_update:
+            self.graph.update_nodes(to_update)
 
-    def upsert_edge(self, edge_id: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_edge(edge_id, updates)
+    def upsert_edge(self, source_name: str, target_name: str, updates: Dict[str, Any]) -> None:
+        self.graph.update_edge(source_name, target_name, updates)
 
     def upsert_edges(self, updates_list: List[Dict[str, Any]]) -> None:
-        self.graph.update_edges(updates_list)
+        to_add = []
+        to_update = []
+        for upd in updates_list:
+            existing = self.graph.get_edge(upd["source_name"], upd["target_name"])
+            if existing is None:
+                to_add.append(upd)
+            else:
+                to_update.append(upd)
+        if to_add:
+            self.graph.add_edges(to_add)
+        if to_update:
+            self.graph.update_edges(to_update)
 
     # 4) Chunk Vectors
     def upsert_chunk_vector(self, chunks: Sequence[Dict[str, Any]]) -> None:

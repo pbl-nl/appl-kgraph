@@ -5,15 +5,9 @@ import re
 import json
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from graph.prompts import PROMPTS
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 load_dotenv()
-# ─────────────────────────────────────────────────────────────
-# Load prompt templates from your uploaded prompts.py
-# ─────────────────────────────────────────────────────────────
-try:
-    from prompts import PROMPTS  # type: ignore
-except Exception as e:  # pragma: no cover
-    raise RuntimeError("Could not import PROMPTS from prompts.py. Place prompts.py next to this script.") from e
 
 # ─────────────────────────────────────────────────────────────
 # Azure OpenAI chat client (env-driven)
@@ -314,6 +308,8 @@ def extract_from_chunks(
         ents, rels, kws = extract_entities_relations_for_chunk(
             ch, client=client, language=language, entity_types=entity_types
         )
+        #TODO: ask whether the extraction is really completed
+        # If not send with new prompt to complete
         all_entities.extend(ents)
         all_relationships.extend(rels)
         all_keywords.extend(kws)

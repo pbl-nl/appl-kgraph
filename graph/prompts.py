@@ -330,6 +330,17 @@ When handling content with timestamps:
 
 Response:"""
 
+PROMPTS["summarize_text"] = """---Role---
+You are a helpful assistant responsible for generating a concise summary of the data provided below.
+Given a text document, please provide a concise summary that captures the main points and key information.
+Use {language} as output language.
+
+#######
+---Data---
+{text}
+#######
+Output:"""
+
 if __name__ == "__main__":
     import argparse
     argparser = argparse.ArgumentParser(description="Process some documents.")

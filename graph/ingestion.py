@@ -52,6 +52,10 @@ def chunk_pages(pages: Tuple[int, str], meta_doc_id: str, filename: str):
         })
     return norm
 
+# TODO: While grouping nodes and edges, pay attention to not exceed any DB field limits
+# and also more importantly make sure that DELIMITER and some unnecessary punctuations at the start/end of merged fields are removed.
+# e.g. if a node description is "desc1||desc2||", it should be "desc1||desc2" after merging.
+# sometimes LLM generated descriptions or former versions may have trailing punctuation like .,;! etc.
 
 def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped = defaultdict(list)
@@ -179,9 +183,9 @@ def fill_missing_nodes(storage: Storage, edges: List[Dict[str, Any]]) -> List[Di
         for name in [edge["source_name"], edge["target_name"]]:
             node_names[name].append({"source_id": edge["source_id"], "filepath": edge["filepath"]})
     # Merge multiple source_id/filepath entries per node name
-        node_names = {name: {"source_id": DELIMITER.join({info["source_id"] for info in infos}),
-                             "filepath": DELIMITER.join({info["filepath"] for info in infos})}
-                      for name, infos in node_names.items()}
+    node_names = {name: {"source_id": DELIMITER.join({info["source_id"] for info in infos}),
+                        "filepath": DELIMITER.join({info["filepath"] for info in infos})}
+                    for name, infos in node_names.items()}
 
     added_nodes = []
     for name, info in node_names.items():
@@ -224,8 +228,10 @@ def ingest_paths(paths: List[Path]):
         # res['entities'], res['relationships'], res['content_keywords']
         res = extract_from_chunks(chunks)
         nodes, edges = merge_graph_data(storage, res['entities'], res['relationships'])
-        storage.upsert_nodes(nodes)
-        storage.upsert_edges(edges)
+        if nodes:
+            storage.upsert_nodes(nodes)
+        if edges:
+            storage.upsert_edges(edges)
         # add missing nodes to storage with minimal info in case edges refer to non-existing nodes
         missing_nodes = fill_missing_nodes(storage, edges)
         if missing_nodes:

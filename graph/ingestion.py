@@ -8,6 +8,7 @@ from graph.chunker import chunk_parsed_pages
 from graph.extractor import extract_from_chunks
 from collections import defaultdict
 from graph.llm import llm_summarize_text
+from collections import Counter
 
 DELIMITER = "||"
 LIMIT_DESCRIPTION = 5 # Max number of '||' separated segments before summarization
@@ -74,9 +75,11 @@ def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str,
 
     for name in list(grouped.keys()):
         attrs = grouped[name]
-        from collections import Counter
-        # Choose the most common type if multiple
-        most_common_type, _ = Counter([a["type"] for a in attrs]).most_common(1)[0]
+        # Choose the most common type if multiple and try to avoid empty/None types if possible
+        # which can happen when adding edges with inexisting nodes in graph
+        types = [a["type"] for a in attrs]
+        known_types = [t for t in types if t and str(t).strip()]
+        most_common_type, _ = Counter(known_types or types).most_common(1)[0]
         t = most_common_type
         descriptions = DELIMITER.join({d.strip() for a in attrs if a.get("description") for d in a.get("description").split(DELIMITER)})
         source_ids = DELIMITER.join({s.strip() for a in attrs if a.get("source_id") for s in a.get("source_id").split(DELIMITER)})
@@ -169,6 +172,24 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     return merged_entities, merged_relations
 
 
+def fill_missing_nodes(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensures all nodes referenced in edges exist in storage, adding minimal info if needed."""
+    node_names = defaultdict(list)
+    for edge in edges:
+        for name in [edge["source_name"], edge["target_name"]]:
+            node_names[name].append({"source_id": edge["source_id"], "filepath": edge["filepath"]})
+    # Merge multiple source_id/filepath entries per node name
+        node_names = {name: {"source_id": DELIMITER.join({info["source_id"] for info in infos}),
+                             "filepath": DELIMITER.join({info["filepath"] for info in infos})}
+                      for name, infos in node_names.items()}
+
+    added_nodes = []
+    for name, info in node_names.items():
+        if not storage.get_node(name=name):
+            storage.upsert_nodes([{"name": name, "type": "", "description": "", "source_id": info["source_id"], "filepath": info["filepath"]}])
+            added_nodes.append({"name": name, "type": "", "description": "", "source_id": info["source_id"], "filepath": info["filepath"]})
+    return added_nodes
+
 def ingest_paths(paths: List[Path]):
     """Ingests files at given paths into the storage system."""
     storage = Storage()
@@ -205,6 +226,10 @@ def ingest_paths(paths: List[Path]):
         nodes, edges = merge_graph_data(storage, res['entities'], res['relationships'])
         storage.upsert_nodes(nodes)
         storage.upsert_edges(edges)
+        # add missing nodes to storage with minimal info in case edges refer to non-existing nodes
+        missing_nodes = fill_missing_nodes(storage, edges)
+        if missing_nodes:
+            nodes.extend(missing_nodes)
 
         all_entities.extend(nodes)
         all_relations.extend(edges)

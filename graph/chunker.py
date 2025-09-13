@@ -40,6 +40,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Iterable
+from settings import settings
 
 
 # Avoid variable-width lookbehind (unsupported by Python's 're').
@@ -105,10 +106,10 @@ def _sentences_len(sentences: Iterable[Sentence], join_with: str = " ") -> int:
 
 def chunk_parsed_pages(
     pages: List[Tuple[int, str]],
-    max_chars: int = 1200,
-    overlap_chars: int = 200,
-    include_overlap_in_limit: bool = True,
-    join_with: str = " ",
+    max_chars: int = settings.chunking.max_chars,
+    overlap_chars: int = settings.chunking.overlap_chars,
+    include_overlap_in_limit: bool = settings.chunking.include_overlap_in_limit,
+    join_with: str = settings.chunking.join_with,
 ) -> List[Dict[str, Any]]:
     """
     Chunk a parsed file represented as list of (page_number, text) tuples.
@@ -228,10 +229,10 @@ def chunk_parsed_pages(
 
 def chunk_text(
     text: str,
-    max_chars: int = 1200,
-    overlap_chars: int = 200,
-    include_overlap_in_limit: bool = True,
-    join_with: str = " "
+    max_chars: int = settings.chunking.max_chars,
+    overlap_chars: int = settings.chunking.overlap_chars,
+    include_overlap_in_limit: bool = settings.chunking.include_overlap_in_limit,
+    join_with: str = settings.chunking.join_with
 ) -> List[Dict[str, Any]]:
     """
     Convenience wrapper to chunk a plain text string (non-PDF) using the same logic.

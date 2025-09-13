@@ -2,16 +2,14 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
-from graph.storage import Storage, _normalize_pair
-from graph.fileparser import FileParser
-from graph.chunker import chunk_parsed_pages
-from graph.extractor import extract_from_chunks
+from storage import Storage, _normalize_pair
+from fileparser import FileParser
+from chunker import chunk_parsed_pages
+from extractor import extract_from_chunks
 from collections import defaultdict
-from graph.llm import llm_summarize_text
+from llm import llm_summarize_text
 from collections import Counter
-
-DELIMITER = "||"
-LIMIT_DESCRIPTION = 5 # Max number of '||' separated segments before summarization
+from settings import settings
 
 def parse_to_pages(filepath: Path):
     pages = None
@@ -85,9 +83,9 @@ def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str,
         known_types = [t for t in types if t and str(t).strip()]
         most_common_type, _ = Counter(known_types or types).most_common(1)[0]
         t = most_common_type
-        descriptions = DELIMITER.join({d.strip() for a in attrs if a.get("description") for d in a.get("description").split(DELIMITER)})
-        source_ids = DELIMITER.join({s.strip() for a in attrs if a.get("source_id") for s in a.get("source_id").split(DELIMITER)})
-        filepaths = DELIMITER.join({f.strip() for a in attrs if a.get("filepath") for f in a.get("filepath").split(DELIMITER)})
+        descriptions = settings.ingestion.delimiter.join({d.strip() for a in attrs if a.get("description") for d in a.get("description").split(settings.ingestion.delimiter)})
+        source_ids = settings.ingestion.delimiter.join({s.strip() for a in attrs if a.get("source_id") for s in a.get("source_id").split(settings.ingestion.delimiter)})
+        filepaths = settings.ingestion.delimiter.join({f.strip() for a in attrs if a.get("filepath") for f in a.get("filepath").split(settings.ingestion.delimiter)})
         grouped[name] = {
                 "name": name,
                 "type": t,
@@ -116,7 +114,7 @@ def group_edges(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str,
         src, tgt = _normalize_pair(a, b)
         grouped[(src, tgt)].append({
             "description": e.get("description", ""),
-            "keywords": DELIMITER.join({k.strip() for k in e.get("keywords", "").split(',') if k.strip()}),
+            "keywords": settings.ingestion.delimiter.join({k.strip() for k in e.get("keywords", "").split(',') if k.strip()}),
             "weight": float(e.get("weight", 0)),      # may be None or number
             "source_id": e.get("source_id", ""),
             "filepath": e.get("filepath", "")
@@ -137,11 +135,11 @@ def group_edges(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str,
     # 3) collapse each pair's attrs into one merged record
     merged = []
     for (src, tgt), attrs in grouped.items():
-        descriptions = DELIMITER.join({d.strip() for a in attrs if a.get("description") for d in a["description"].split(DELIMITER)})
-        keywords     = DELIMITER.join({k.strip() for a in attrs if a.get("keywords") for k in a["keywords"].split(DELIMITER) if k.strip()})
+        descriptions = settings.ingestion.delimiter.join({d.strip() for a in attrs if a.get("description") for d in a["description"].split(settings.ingestion.delimiter)})
+        keywords     = settings.ingestion.delimiter.join({k.strip() for a in attrs if a.get("keywords") for k in a["keywords"].split(settings.ingestion.delimiter) if k.strip()})
         weights      = sum([a["weight"]  for a in attrs if a.get("weight") is not None])
-        source_ids   = DELIMITER.join({a["source_id"]    for a in attrs if a.get("source_id")})
-        filepaths    = DELIMITER.join({a["filepath"]     for a in attrs if a.get("filepath")})
+        source_ids   = settings.ingestion.delimiter.join({a["source_id"]    for a in attrs if a.get("source_id")})
+        filepaths    = settings.ingestion.delimiter.join({a["filepath"]     for a in attrs if a.get("filepath")})
 
         merged.append({
             "source_name": src,
@@ -161,7 +159,7 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     merged_entities = []
     entities = group_nodes(storage, entities)
     for ent in entities:
-        if len(ent["description"].split("||")) > LIMIT_DESCRIPTION:
+        if len(ent["description"].split("||")) > settings.ingestion.description_segment_limit:
             ent["description"] = llm_summarize_text(ent["description"])
         merged_entities.append(ent)
 
@@ -169,7 +167,7 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     merged_relations = []
     relations = group_edges(storage, relations)
     for rel in relations:
-        if len(rel["description"].split("||")) > LIMIT_DESCRIPTION:
+        if len(rel["description"].split("||")) > settings.ingestion.description_segment_limit:
             rel["description"] = llm_summarize_text(rel["description"])
         merged_relations.append(rel)
 
@@ -183,8 +181,8 @@ def fill_missing_nodes(storage: Storage, edges: List[Dict[str, Any]]) -> List[Di
         for name in [edge["source_name"], edge["target_name"]]:
             node_names[name].append({"source_id": edge["source_id"], "filepath": edge["filepath"]})
     # Merge multiple source_id/filepath entries per node name
-    node_names = {name: {"source_id": DELIMITER.join({info["source_id"] for info in infos}),
-                        "filepath": DELIMITER.join({info["filepath"] for info in infos})}
+    node_names = {name: {"source_id": settings.ingestion.delimiter.join({info["source_id"] for info in infos}),
+                        "filepath": settings.ingestion.delimiter.join({info["filepath"] for info in infos})}
                     for name, infos in node_names.items()}
 
     added_nodes = []

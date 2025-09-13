@@ -6,8 +6,9 @@ import json
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from graph.prompts import PROMPTS
-load_dotenv()
+from prompts import PROMPTS
+from settings import settings
+
 
 # ─────────────────────────────────────────────────────────────
 # Azure OpenAI chat client (env-driven)
@@ -18,71 +19,66 @@ load_dotenv()
 #     - AZURE_OPENAI_API_VERSION            (optional, defaults to 2024-02-15-preview)
 # ─────────────────────────────────────────────────────────────
 try:
-    from openai import AzureOpenAI  # type: ignore
+    from openai import OpenAI, AzureOpenAI  # type: ignore
 except Exception:
+    OpenAI = None  # type: ignore
     AzureOpenAI = None  # type: ignore
 
+class Chat:
+    """
+    Unified chat client. Chooses OpenAI or AzureOpenAI based on LLM_PROVIDER.
+    """
+    def __init__(self):
+        prov = settings.provider.provider
 
-@dataclass
-class AzureConfig:
-    endpoint: str
-    api_key: str
-    api_version: str = "2024-02-15-preview"
-    chat_deployment: Optional[str] = None  # AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
-
-
-class AzureChat:
-    def __init__(self, cfg: Optional[AzureConfig] = None):
-        if AzureOpenAI is None:
-            raise RuntimeError("openai package not installed. pip install openai")
-
-        if cfg is None:
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            api_version = os.getenv("AZURE_OPENAI_API_VERSION")
-            chat_deployment = os.getenv("AZURE_OPENAI_LLM_DEPLOYMENT_NAME")
-            if not endpoint or not api_key or not chat_deployment:
-                raise RuntimeError(
-                    "Missing Azure env vars. Set AZURE_OPENAI_ENDPOINT, "
-                    "AZURE_OPENAI_API_KEY, AZURE_OPENAI_LLM_DEPLOYMENT_NAME"
-                )
-            cfg = AzureConfig(
-                endpoint=endpoint,
-                api_key=api_key,
-                api_version=api_version,
-                chat_deployment=chat_deployment,
+        if prov == "azure":
+            if AzureOpenAI is None:
+                raise RuntimeError("openai package not installed. pip install openai")
+            self.client = AzureOpenAI(
+                api_key=settings.provider.azure_api_key,
+                api_version=settings.provider.azure_api_version,
+                azure_endpoint=settings.provider.azure_endpoint,
             )
-        self.cfg = cfg
-        self.client = AzureOpenAI(
-            api_key=cfg.api_key,
-            api_version=cfg.api_version,
-            azure_endpoint=cfg.endpoint,
-        )
+            self.model = settings.provider.azure_llm_deployment
 
-    def generate(
-        self,
-        prompt: str,
-        system: Optional[str] = None,
-        temperature: float = 0.1,
-        max_tokens: int = 2048,
-    ) -> str:
-        messages = []
+        elif prov == "openai":
+            if OpenAI is None:
+                raise RuntimeError("openai package not installed. pip install openai")
+            base = settings.provider.openai_base_url
+            if base:
+                self.client = OpenAI(api_key=settings.provider.openai_api_key, base_url=base)
+            else:
+                self.client = OpenAI(api_key=settings.provider.openai_api_key)
+            self.model = settings.provider.openai_llm_model
+
+        else:
+            raise RuntimeError("LLM_PROVIDER must be 'openai' or 'azure'.")
+
+    def generate(self, prompt: str,
+             system: Optional[str] = None,
+             temperature: Optional[float] = None,
+             max_tokens: Optional[int] = None) -> str:
+        t = settings.chat.temperature if temperature is None else temperature
+        mt = settings.chat.max_tokens if max_tokens is None else max_tokens
+
+        messages: List[Dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
         resp = self.client.chat.completions.create(
-            model=self.cfg.chat_deployment,
+            model=self.model,
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=t,
+            max_tokens=mt,
         )
         return resp.choices[0].message.content or ""
 
-
-
 def llm_summarize_text(to_summarize: str, language: str = "English") -> str:
-    chat = AzureChat()
+    """
+    Small helper used elsewhere (e.g., during long description merges).
+    """
+    chat = Chat()  # provider-agnostic
     prompt = PROMPTS["summarize_text"].format(text=to_summarize, language=language)
-    summary = chat.generate(prompt)
-    return summary.strip()
+    return chat.generate(prompt).strip()
+

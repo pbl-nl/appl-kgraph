@@ -2,25 +2,20 @@
 from __future__ import annotations
 import os
 import sqlite3
+import json, hashlib
 from typing import Dict, Any, Iterable, List, Optional, Sequence, Tuple
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dotenv import load_dotenv
-from openai import AzureOpenAI
+from openai import OpenAI, AzureOpenAI
 import chromadb
+from settings import settings
 
-load_dotenv()
 
 
 # ---------------------------
 # Helpers
 # ---------------------------
-
-def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(name)
-    return v if v is not None else default
-
-
 def _ensure_dir_for(path: str) -> None:
     d = os.path.dirname(os.path.abspath(path))
     if d and not os.path.exists(d):
@@ -31,47 +26,113 @@ def _normalize_pair(a: str, b: str) -> Tuple[str, str]:
     """Return a canonical ordering for an undirected pair."""
     return (a, b) if a <= b else (b, a)
 
+def _current_models_fingerprint(embedder) -> dict:
+    """
+    Build a stable fingerprint for both the embedding model and the chat model.
+    Stored on each Chroma collection so we can verify at open time.
+    """
+    prov = settings.provider.provider  # "openai" | "azure"
+
+    if prov == "openai":
+        emb_model = settings.provider.openai_embeddings_model
+        llm_model = settings.provider.openai_llm_model
+        endpoint = settings.provider.openai_base_url or "https://api.openai.com/v1"
+        api_version = ""  # not applicable
+    else:
+        emb_model = settings.provider.azure_embeddings_deployment
+        llm_model = settings.provider.azure_llm_deployment
+        endpoint = settings.provider.azure_endpoint
+        api_version = settings.provider.azure_api_version
+
+    fp = {
+        "provider": prov,
+        "embedding_model": emb_model,
+        "embedding_dim": embedder.dimension,
+        "llm_model": llm_model,
+        "endpoint": endpoint,
+        "api_version": api_version,
+    }
+    fp_json = json.dumps(fp, sort_keys=True)
+    fp_sha = hashlib.sha256(fp_json.encode("utf-8")).hexdigest()
+    fp["sha256"] = fp_sha
+    fp["json"] = fp_json
+    return fp
 
 # ---------------------------
 # ---------------------------
 # Embeddings
 # ---------------------------
 
-class AzureEmbedder:
+class Embedder:
     """
-    Thin wrapper around Azure OpenAI embeddings.
-    Expects environment variables:
-      - AZURE_OPENAI_ENDPOINT
-      - AZURE_OPENAI_API_KEY
-      - AZURE_OPENAI_API_VERSION (optional, default '2024-02-15-preview')
-      - AZURE_OPENAI_EMB_DEPLOYMENT_NAME  (embedding deployment name)
+    Provider-agnostic embeddings.
+    For OpenAI:
+      - OPENAI_API_KEY, OPENAI_EMBEDDINGS_MODEL, [OPENAI_BASE_URL]
+    For Azure:
+      - AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_EMB_DEPLOYMENT_NAME
     """
-    def __init__(self):
-        if AzureOpenAI is None:  # type: ignore[truthy-bool]
-            raise RuntimeError("openai package not installed. pip install openai")
-        endpoint = _get_env("AZURE_OPENAI_ENDPOINT")
-        api_key = _get_env("AZURE_OPENAI_API_KEY")
-        api_version = _get_env("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-        if not endpoint or not api_key:
-            raise RuntimeError("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY")
-        self.model = _get_env("AZURE_OPENAI_EMB_DEPLOYMENT_NAME")
-        if not self.model:
-            raise RuntimeError("Set AZURE_OPENAI_EMB_DEPLOYMENT_NAME to your embeddings deployment name")
-        self.client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=endpoint)
+    def __init__(
+        self,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        azure_endpoint: Optional[str] = None,
+        azure_api_version: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        prov = (provider or settings.provider.provider).strip().lower()
+        self.provider = prov
+        self._dimension = None  # Dimensionality property for compatibility between LLMs
 
-    def embed_texts(self, texts: Iterable[str], batch_size: int = 64) -> List[List[float]]:
+        if prov == "azure":
+            if AzureOpenAI is None:
+                raise RuntimeError("openai package not installed. pip install openai")
+            self.model = model or settings.provider.azure_embeddings_deployment
+            key = api_key or settings.provider.azure_api_key
+            endpoint = azure_endpoint or settings.provider.azure_endpoint
+            version = azure_api_version or settings.provider.azure_api_version
+            if not (self.model and key and endpoint):
+                raise RuntimeError("Set AZURE_OPENAI_EMB_DEPLOYMENT_NAME, AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT.")
+            self.client = AzureOpenAI(api_key=key, api_version=version, azure_endpoint=endpoint)
+
+        elif prov == "openai":
+            if OpenAI is None:
+                raise RuntimeError("openai package not installed. pip install openai")
+            self.model = model or (settings.provider.openai_embeddings_model or "text-embedding-3-small")
+            key = api_key or settings.provider.openai_api_key
+            base = base_url or settings.provider.openai_base_url
+            if not (self.model and key):
+                raise RuntimeError("Set OPENAI_API_KEY and OPENAI_EMBEDDINGS_MODEL.")
+            self.client = OpenAI(api_key=key, base_url=base) if base else OpenAI(api_key=key)
+
+        else:
+            raise RuntimeError("LLM_PROVIDER must be 'openai' or 'azure'.")
+
+    @property
+    def dimension(self) -> int:
+        """
+        Lazily fetch the embedding dimensionality once (cached).
+        """
+        if self._dimension is None:
+            # one cheap call
+            resp = self.client.embeddings.create(input=[" "], model=self.model)
+            self._dimension = len(resp.data[0].embedding)
+        return self._dimension
+    
+    def embed_texts(self, texts: Iterable[str], batch_size: int = settings.embeddings.batch_size) -> List[List[float]]:
         out: List[List[float]] = []
         batch: List[str] = []
         for t in texts:
             batch.append(t)
             if len(batch) >= batch_size:
-                resp = self.client.embeddings.create(input=batch, model=self.model)  # type: ignore[attr-defined]
+                resp = self.client.embeddings.create(input=batch, model=self.model)  # both OpenAI & Azure
                 out.extend([d.embedding for d in resp.data])
                 batch = []
         if batch:
-            resp = self.client.embeddings.create(input=batch, model=self.model)  # type: ignore[attr-defined]
+            resp = self.client.embeddings.create(input=batch, model=self.model)
             out.extend([d.embedding for d in resp.data])
         return out
+
 
 
 # ---------------------------
@@ -620,13 +681,84 @@ class GraphDB:
 # ---------------------------
 
 class _ChromaBase:
-    def __init__(self, collection: str, chroma_dir: str, embedder: Optional[AzureEmbedder] = None):
+    def __init__(self, collection: str, chroma_dir: str, embedder: Optional[Embedder] = None):
         if chromadb is None:
             raise RuntimeError("chromadb not installed. pip install chromadb")
+
         _ensure_dir_for(os.path.join(chroma_dir, ".sentinel"))
+        self._chroma_dir = chroma_dir   # keep for error message
         self.client = chromadb.PersistentClient(path=chroma_dir)  # type: ignore
-        self.col = self.client.get_or_create_collection(name=collection, metadata={"hnsw:space": "cosine"})
-        self.embedder = embedder or AzureEmbedder()
+        self.col = self.client.get_or_create_collection(
+            name=collection,
+            metadata={"hnsw:space": "cosine"}  # keep existing setting
+        )
+
+        self.embedder = embedder or Embedder()
+
+        # Verify or attach fingerprint
+        self._verify_or_attach_fingerprint()
+
+    def _verify_or_attach_fingerprint(self) -> None:
+        fp = _current_models_fingerprint(self.embedder)
+        meta = dict(self.col.metadata or {})
+
+        stored_json = meta.get("fingerprint_json")
+        stored_sha  = meta.get("fingerprint_sha")
+
+        # First time (no fingerprint): try to attach it
+        if not stored_json or not stored_sha:
+            new_meta = {**meta, "fingerprint_json": fp["json"], "fingerprint_sha": fp["sha256"]}
+            try:
+                # chroma>=0.4 supports modify(); if not, recreate with metadata
+                if hasattr(self.col, "modify"):
+                    self.col.modify(metadata=new_meta)  # type: ignore[attr-defined]
+                else:
+                    # If modify() isn't available, recreate to persist metadata
+                    name = self.col.name
+                    self.client.delete_collection(name)
+                    self.col = self.client.get_or_create_collection(name=name, metadata=new_meta)
+            except Exception:
+                # Non-fatal: if we cannot write metadata, we still proceed *this time*,
+                # but note that subsequent runs may not detect mismatches.
+                pass
+            return
+
+        # Compare with stored
+        try:
+            prev = json.loads(stored_json)
+        except Exception:
+            prev = {}
+
+        mismatches = []
+        for k in ("provider", "embedding_model", "embedding_dim", "llm_model"):
+            if prev.get(k) != fp.get(k):
+                mismatches.append((k, prev.get(k), fp.get(k)))
+
+        if mismatches:
+            # Suggest exact .env keys the user should set to match the stored DB
+            suggestions = []
+            if settings.provider.provider == "openai":
+                for k, old, _ in mismatches:
+                    if k == "embedding_model" and old:
+                        suggestions.append(f"OPENAI_EMBEDDINGS_MODEL={old}")
+                    if k == "llm_model" and old:
+                        suggestions.append(f"OPENAI_LLM_MODEL={old}")
+            else:
+                for k, old, _ in mismatches:
+                    if k == "embedding_model" and old:
+                        suggestions.append(f"AZURE_OPENAI_EMB_DEPLOYMENT_NAME={old}")
+                    if k == "llm_model" and old:
+                        suggestions.append(f"AZURE_OPENAI_LLM_DEPLOYMENT_NAME={old}")
+
+            lines = "\n".join(f"  - {k}: stored='{old}' vs now='{new}'" for k, old, new in mismatches)
+            hint = "\n".join(f"* {s}" for s in suggestions) or "(adjust your settings to match the stored values)"
+
+            raise RuntimeError(
+                f"[Model mismatch] Chroma collection '{self.col.name}' at '{self._chroma_dir}' was built with different models.\n"
+                f"{lines}\n\n"
+                f"To use this existing database, set in your .env:\n{hint}\n\n"
+                f"Or delete/rebuild the collection directory to regenerate vectors."
+            )
 
     def _add(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]):
         embeddings = self.embedder.embed_texts(texts)
@@ -839,12 +971,12 @@ class RelationVectors(_ChromaBase):
 
 @dataclass
 class StoragePaths:
-    documents_db: str = "./storage/documents.sqlite"
-    chunks_db: str = "./storage/chunks.sqlite"
-    graph_db: str = "./storage/graph.sqlite"
-    chroma_chunks: str = "./storage/chroma_chunks"
-    chroma_entities: str = "./storage/chroma_entities"
-    chroma_relations: str = "./storage/chroma_relations"
+    documents_db: str = settings.storage.documents_db
+    chunks_db: str = settings.storage.chunks_db
+    graph_db: str = settings.storage.graph_db
+    chroma_chunks: str = settings.storage.chroma_chunks
+    chroma_entities: str = settings.storage.chroma_entities
+    chroma_relations: str = settings.storage.chroma_relations
 
 
 class Storage:
@@ -860,7 +992,7 @@ class Storage:
     Only 'add' operations are implemented for now.
     """
 
-    def __init__(self, paths: Optional[StoragePaths] = None, embedder: Optional[AzureEmbedder] = None):
+    def __init__(self, paths: Optional[StoragePaths] = None, embedder: Optional[Embedder] = None):
         paths = paths or StoragePaths()
 
         # Schema DBs

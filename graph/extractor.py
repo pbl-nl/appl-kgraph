@@ -4,81 +4,9 @@ import os
 import re
 import json
 from dataclasses import dataclass
-from dotenv import load_dotenv
-from graph.prompts import PROMPTS
+from prompts import PROMPTS
+from llm import Chat
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-load_dotenv()
-
-# ─────────────────────────────────────────────────────────────
-# Azure OpenAI chat client (env-driven)
-#   Required env vars:
-#     - AZURE_OPENAI_ENDPOINT
-#     - AZURE_OPENAI_API_KEY
-#     - AZURE_OPENAI_CHAT_DEPLOYMENT_NAME   (the chat model deployment name)
-#     - AZURE_OPENAI_API_VERSION            (optional, defaults to 2024-02-15-preview)
-# ─────────────────────────────────────────────────────────────
-try:
-    from openai import AzureOpenAI  # type: ignore
-except Exception:
-    AzureOpenAI = None  # type: ignore
-
-
-@dataclass
-class AzureConfig:
-    endpoint: str
-    api_key: str
-    api_version: str = "2024-02-15-preview"
-    chat_deployment: Optional[str] = None  # AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
-
-
-class AzureChat:
-    def __init__(self, cfg: Optional[AzureConfig] = None):
-        if AzureOpenAI is None:
-            raise RuntimeError("openai package not installed. pip install openai")
-
-        if cfg is None:
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            api_version = os.getenv("AZURE_OPENAI_API_VERSION")
-            chat_deployment = os.getenv("AZURE_OPENAI_LLM_DEPLOYMENT_NAME")
-            if not endpoint or not api_key or not chat_deployment:
-                raise RuntimeError(
-                    "Missing Azure env vars. Set AZURE_OPENAI_ENDPOINT, "
-                    "AZURE_OPENAI_API_KEY, AZURE_OPENAI_LLM_DEPLOYMENT_NAME"
-                )
-            cfg = AzureConfig(
-                endpoint=endpoint,
-                api_key=api_key,
-                api_version=api_version,
-                chat_deployment=chat_deployment,
-            )
-        self.cfg = cfg
-        self.client = AzureOpenAI(
-            api_key=cfg.api_key,
-            api_version=cfg.api_version,
-            azure_endpoint=cfg.endpoint,
-        )
-
-    def generate(
-        self,
-        prompt: str,
-        system: Optional[str] = None,
-        temperature: float = 0.1,
-        max_tokens: int = 2048,
-    ) -> str:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        resp = self.client.chat.completions.create(
-            model=self.cfg.chat_deployment,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content or ""
-
 
 # ─────────────────────────────────────────────────────────────
 # Prompt Builder
@@ -256,7 +184,7 @@ def _require_chunk_uuid(chunk: Dict[str, Any]) -> str:
 
 def extract_entities_relations_for_chunk(
     chunk: Dict[str, Any],
-    client: AzureChat,
+    client: Chat,
     language: Optional[str] = None,
     entity_types: Optional[Iterable[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
@@ -291,14 +219,14 @@ def extract_from_chunks(
     chunks: Iterable[Dict[str, Any]],
     language: Optional[str] = None,
     entity_types: Optional[Iterable[str]] = None,
-    client: Optional[AzureChat] = None,
+    client: Optional[Chat] = None,
 ) -> Dict[str, Any]:
     """
     High-level convenience: iterate chunks, call LLM, parse, and return collected results.
     Returns dict with 'entities', 'relationships', 'content_keywords'.
     """
     if client is None:
-        client = AzureChat()  # read env
+        client = Chat()  # read env
 
     all_entities: List[Dict[str, Any]] = []
     all_relationships: List[Dict[str, Any]] = []
@@ -385,7 +313,7 @@ if __name__ == "__main__":
 
     chunks = _default_demo_chunks() if not args.chunks else _load_chunks_from_path(args.chunks)
 
-    client = AzureChat()  # reads env
+    client = Chat()  # reads env
     result = extract_from_chunks(chunks, language=language, entity_types=entity_types, client=client)
 
     # Pretty print

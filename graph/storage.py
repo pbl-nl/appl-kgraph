@@ -159,6 +159,7 @@ class DocumentsDB:
             "language",
             "full_text",
             "full_char_count",
+            "content_hash",
         ]
 
     @contextmanager
@@ -186,7 +187,8 @@ class DocumentsDB:
                 mime_type TEXT,
                 language TEXT,
                 full_text TEXT,
-                full_char_count INTEGER
+                full_char_count INTEGER,
+                content_hash TEXT
             );''')
             con.commit()
 
@@ -210,12 +212,13 @@ class DocumentsDB:
             metadata.get("language"),
             full_text,
             metadata.get("full_char_count", len(full_text) if full_text else 0),
+            metadata.get("content_hash"),
         )
         with self.connect() as con:
             con.execute('''
                 INSERT OR IGNORE INTO documents
-                (doc_id, filename, filepath, file_size, last_modified, created, extension, mime_type, language, full_text, full_char_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                (doc_id, filename, filepath, file_size, last_modified, created, extension, mime_type, language, full_text, full_char_count, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             ''', row)
             con.commit()
 
@@ -231,11 +234,12 @@ class DocumentsDB:
     def get_document_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
         with self.connect() as con:
             cur = con.cursor()
-            cur.execute("SELECT * FROM documents WHERE filename = ?;", (filename,))
+            cur.execute(
+                "SELECT * FROM documents WHERE filename = ? ORDER BY created DESC LIMIT 1;",
+                (filename,)
+            )
             row = cur.fetchone()
-            if row:
-                return dict(zip(self.KEYS, row))
-            return None
+            return dict(zip(self.KEYS, row)) if row else None
         
     def list_documents(self) -> List[Dict[str, Any]]:
         with self.connect() as con:

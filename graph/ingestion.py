@@ -1,7 +1,8 @@
 from __future__ import annotations
+import mimetypes
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Sequence, Tuple
 from storage import Storage, _normalize_pair
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
@@ -10,6 +11,43 @@ from collections import defaultdict
 from llm import llm_summarize_text
 from collections import Counter
 from settings import settings
+import os
+from dataclasses import dataclass
+import hashlib
+
+# Helpers -------------------------------------------
+
+@dataclass(frozen=True)
+class FileStats:
+    size: int
+    mtime: float
+
+def compute_file_stats(path: Path) -> FileStats:
+    st = os.stat(path)
+    return FileStats(size=st.st_size, mtime=st.st_mtime)
+
+def normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+    # Lower-case keys, unify language key
+    meta = {str(k).lower(): v for k, v in (meta or {}).items()}
+    # normalize to 'language'
+    if "Language" in meta and "language" not in meta:
+        meta["language"] = meta.pop("Language")
+    return meta
+
+def file_sha256(p: Path, chunk_size=1024*1024) -> str:
+    h = hashlib.sha256()
+    with p.open('rb') as f:
+        for chunk in iter(lambda: f.read(chunk_size), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+def should_skip_ingestion(storage, p: Path) -> bool:
+    doc = storage.get_document_by_filename(p.name)
+    if not doc:
+        return False
+    return doc.get("content_hash") == file_sha256(p)
+
+# Core functions ------------------------------------
 
 def parse_to_pages(filepath: Path):
     pages = None
@@ -28,25 +66,36 @@ def parse_to_pages(filepath: Path):
     
     return pages, meta
 
-def chunk_pages(pages: Tuple[int, str], meta_doc_id: str, filename: str):
-    chunks = None
-    
+def build_chunks(
+    pages: Sequence[Tuple[int, str]],
+    doc_id: str,
+    filename: str,
+) -> List[Dict[str, Any]]:
+    """
+    Normalize chunks for storage:
+      - Ensures chunk_uuid, chunk_id, char_count, start_page, end_page
+      - Attaches doc_id and filename to each chunk
+      - Returns [] on chunking error (non-fatal)
+    """
     try:
-        chunks = chunk_parsed_pages(pages)
+        raw = chunk_parsed_pages(pages)
     except Exception:
-        chunks = None
-    
-    norm = []
-    for i, c in enumerate(chunks):
+        return []
+
+    norm: List[Dict[str, Any]] = []
+    for i, c in enumerate(raw or []):
+        text = (c.get("text") or "")
+        start = int(c.get("start_page", 0))
+        end = int(c.get("end_page", start))
         norm.append({
-            "chunk_id": int(c.get("chunk_id", i)),
             "chunk_uuid": c.get("chunk_uuid") or str(uuid.uuid4()),
-            "text": c.get("text") or "",
-            "char_count": int(c.get("char_count") or len(c.get("text") or "")),
-            "start_page": c.get("start_page"),
-            "end_page": c.get("end_page"),
-            "doc_id": meta_doc_id,
-            "filename": filename
+            "doc_id": doc_id,
+            "chunk_id": int(c.get("chunk_id", i)),
+            "filename": filename,
+            "text": text,
+            "char_count": int(c.get("char_count", len(text))),
+            "start_page": start,
+            "end_page": end,
         })
     return norm
 
@@ -204,21 +253,37 @@ def ingest_paths(paths: List[Path]):
     for p in paths:
         if not p.exists() or not p.is_file():
             continue
-        pages, metadata = parse_to_pages(p)
-        if not pages or not metadata:
+        if should_skip_ingestion(storage, p):
+            print(f"Skipping {p.name} (unchanged).")
+            continue
+        pages, file_meta = parse_to_pages(p)
+        if not pages or not file_meta:
             print(f"Skipping {p} due to parsing error.")
             continue
-        full_text = "\n".join([page[1] for page in pages])
-        chunks = chunk_pages(pages, meta_doc_id=metadata["doc_id"], filename=metadata["filename"])
 
-        # Add document and chunks to storage
-        if metadata.get("filepath") == storage.get_chunks_by_filename(metadata["filepath"]):
-            # TODO: Add other checks like last modified time, file size, hash, etc.
-            # which may require deletion/update of old chunks, entities, relations, vectors, etc.
-            continue  # Skip if already ingested
-        
-        #TODO: Format all data specifically metadata. Lowercase keys, ensure required fields, etc.
-        storage.add_document(metadata, full_text)
+        file_meta = normalize_metadata(file_meta)
+        full_text = "\n".join([page[1] for page in pages])
+        content_hash = file_sha256(p)
+
+        # Build storage row (doc_meta) – this is distinct from file_meta and is schema-aligned fields expected by DocumentsDB
+        st = p.stat()
+        doc_meta = {
+            "doc_id": str(uuid.uuid4()),
+            "filename": p.name,
+            "filepath": str(p),                          # keep if useful for tracing
+            "file_size": st.st_size,
+            "last_modified": st.st_mtime,
+            "created": st.st_mtime,                      # or time.time()
+            "extension": p.suffix.lower(),
+            "mime_type": "",                             # optional; leave empty if unused
+            "language": (file_meta or {}).get("language", "unknown"),
+            "content_hash": content_hash,                # ← your chosen idempotency key
+            "full_char_count": len(full_text),
+        }
+              
+        storage.add_document(doc_meta, full_text)
+
+        chunks = build_chunks(pages, doc_meta["doc_id"], doc_meta["filename"])
         storage.add_chunks(chunks)
         all_chunks.extend(chunks)
 

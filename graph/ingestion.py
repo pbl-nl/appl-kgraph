@@ -2,7 +2,7 @@ from __future__ import annotations
 import mimetypes
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Sequence, Tuple
+from typing import Dict, Any, List, Sequence, Tuple, Optional
 from storage import Storage, _normalize_pair
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
@@ -37,11 +37,16 @@ def file_sha256(p: Path, chunk_size=1024*1024) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-def should_skip_ingestion(storage, p: Path) -> bool:
+def should_skip_ingestion(storage: Storage, p: Path, content_hash: Optional[str] = None) -> bool:
+    """
+    Return True if file 'p' has already been ingested (same content_hash).
+    If 'content_hash' is provided, reuse it to avoid hashing twice.
+    """
     doc = storage.get_document_by_filename(p.name)
     if not doc:
         return False
-    return doc.get("content_hash") == file_sha256(p)
+    ch = content_hash or file_sha256(p)
+    return doc.get("content_hash") == ch
 
 # Core functions ------------------------------------
 
@@ -312,7 +317,8 @@ def ingest_paths(paths: List[Path]):
     for p in paths:
         if not p.exists() or not p.is_file():
             continue
-        if should_skip_ingestion(storage, p):
+        content_hash = file_sha256(p)
+        if should_skip_ingestion(storage, p, content_hash):
             print(f"Skipping {p.name} (unchanged).")
             continue
         pages, file_meta = parse_to_pages(p)
@@ -322,8 +328,7 @@ def ingest_paths(paths: List[Path]):
 
         file_meta = normalize_metadata(file_meta)
         full_text = "\n".join([page[1] for page in pages])
-        content_hash = file_sha256(p)
-
+        
         # Build storage row (doc_meta) – this is distinct from file_meta and is schema-aligned fields expected by DocumentsDB
         st = p.stat()
         doc_meta = {
@@ -334,9 +339,9 @@ def ingest_paths(paths: List[Path]):
             "last_modified": st.st_mtime,
             "created": st.st_mtime,                      # or time.time()
             "extension": p.suffix.lower(),
-            "mime_type": "",                             # optional; leave empty if unused
+            "mime_type": ((file_meta or {}).get("mime_type") or mimetypes.guess_type(str(p))[0] or ""),
             "language": (file_meta or {}).get("language", "unknown"),
-            "content_hash": content_hash,                # ← your chosen idempotency key
+            "content_hash": content_hash,                
             "full_char_count": len(full_text),
         }
               

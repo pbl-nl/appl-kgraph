@@ -273,37 +273,82 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     return merged_entities, merged_relations
 
 
-def fill_missing_nodes(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Ensure all names referenced by edges exist as nodes. Because relationships currently
-    carry *names only*, we conservatively create a placeholder node per name with
-    type='unknown' when no node for that (name, 'unknown') exists yet.
+    Create only the *necessary* endpoint nodes for edges, following the refined policy:
+      A) If an edge carries 'source_type'/'target_type' (typed edges), ensure those exact (name,type) nodes exist.
+      B) If no type hints:
+           - If a name has 0 typed nodes -> create (name, "unknown")
+           - If a name has >1 typed nodes -> create (name, "unknown")
+           - If exactly 1 typed node exists -> do nothing (unambiguous)
+    Returns a list of node dicts that were *created* (so caller can vectorize them).
     """
     delim = settings.ingestion.delimiter
-    by_name: Dict[str, Dict[str, set]] = defaultdict(lambda: {"source_id": set(), "filepath": set()})
+
+    # 1) Collect per-name type hints coming from relationships (if extractor provided them).
+    hinted: Dict[str, set] = {}
     for e in edges:
-        for nm in (e["source_name"], e["target_name"]):
-            if e.get("source_id"):
-                by_name[nm]["source_id"].add(e["source_id"])
-            if e.get("filepath"):
-                by_name[nm]["filepath"].add(e["filepath"])
-    names = list(by_name.keys())
-    existing = storage.get_nodes(names) if names else []
-    existing_pairs = {(row["name"], row["type"]) for row in existing}
+        s = e.get("source_name", "")
+        t = e.get("target_name", "")
+        st = (e.get("source_type") or "").strip()
+        tt = (e.get("target_type") or "").strip()
+        if s:
+            hinted.setdefault(s, set())
+            if st:
+                hinted[s].add(st)
+        if t:
+            hinted.setdefault(t, set())
+            if tt:
+                hinted[t].add(tt)
+
+    # 2) Gather all unique endpoint names
+    names: List[str] = []
+    seen = set()
+    for e in edges:
+        for nm in (e.get("source_name", ""), e.get("target_name", "")):
+            if nm and nm not in seen:
+                seen.add(nm)
+                names.append(nm)
+
+    if not names:
+        return []
+
+    # 3) Bulk fetch existing nodes for those names; map name -> set(types)
+    existing = storage.get_nodes(names)
+    by_name_types: Dict[str, set] = {}
+    for row in existing:
+        nm = row["name"]
+        tp = (row.get("type") or "").strip()
+        by_name_types.setdefault(nm, set()).add(tp)
+
+    # 4) Decide which placeholders to create
     to_add: List[Dict[str, Any]] = []
-    for name, meta in by_name.items():
-        pair = (name, "unknown")
-        if pair not in existing_pairs:
-            to_add.append({
-                "name": name,
-                "type": "unknown",
-                "description": "",
-                "source_id": delim.join(sorted(meta["source_id"])) if meta["source_id"] else "",
-                "filepath": delim.join(sorted(meta["filepath"])) if meta["filepath"] else "",
-            })
+
+    # 4a) If typed hints exist for a name, ensure those *typed* nodes exist (prefer exact typed placeholders).
+    for nm, hinted_types in hinted.items():
+        if not hinted_types:
+            continue
+        existing_types = by_name_types.get(nm, set())
+        missing = hinted_types - existing_types
+        for tp in missing:
+            to_add.append({"name": nm, "type": tp, "description": "", "source_id": "", "filepath": ""})
+            by_name_types.setdefault(nm, set()).add(tp)  # reflect immediate creation in our view
+
+    # 4b) For names without typed hints, apply "unknown" policy only when none or many
+    for nm in names:
+        if nm in hinted:  # already handled above
+            continue
+        types = by_name_types.get(nm, set())
+        if len(types) == 0 or len(types) > 1:
+            if "unknown" not in types:
+                to_add.append({"name": nm, "type": "unknown", "description": "", "source_id": "", "filepath": ""})
+                by_name_types.setdefault(nm, set()).add("unknown")
+
+    # 5) Persist any new nodes
     if to_add:
         storage.upsert_nodes(to_add)
     return to_add
+
 
 def ingest_paths(paths: List[Path]):
     """Ingests files at given paths into the storage system."""
@@ -354,18 +399,30 @@ def ingest_paths(paths: List[Path]):
         # Extract entities and relations from chunks
         # res['entities'], res['relationships'], res['content_keywords']
         res = extract_from_chunks(chunks)
-        nodes, edges = merge_graph_data(storage, res['entities'], res['relationships'])
+        
+        # Consolidate/merge entities (by (name,type)) and upsert those first
+        entities_in = res.get("entities", []) or []
+        nodes = group_nodes(storage, entities_in)  # keeps (name,type) identity
         if nodes:
-            storage.upsert_nodes(nodes)
-        if edges:
-            storage.upsert_edges(edges)
-        # add missing nodes to storage with minimal info in case edges refer to non-existing nodes
-        missing_nodes = fill_missing_nodes(storage, edges)
-        if missing_nodes:
-            nodes.extend(missing_nodes)
+            storage.upsert_nodes(nodes)                 # write schema
+            all_entities.extend(nodes)                  # collect for vector DB later
 
-        all_entities.extend(nodes)
-        all_relations.extend(edges)
+        #  Ensure edge endpoints exist with refined "unknown" policy
+        #    - If relationships carry source_type/target_type, ensure those exact (name,type) exist
+        #    - Else:
+        #        • 0 typed nodes for a name  -> create (name,"unknown")
+        #        • >1 typed nodes for a name -> create (name,"unknown")
+        #        • exactly 1 typed node      -> do nothing
+        edges_in = res.get("relationships", []) or []
+        placeholders = ensure_edge_endpoints(storage, edges_in)
+        if placeholders:
+            all_entities.extend(placeholders)           # collect for vector DB later
+
+        # Group/merge edges and upsert
+        edges = group_edges(storage, edges_in)          # bulk-merge with existing edges
+        if edges:
+            storage.upsert_edges(edges)                 # write schema
+            all_relations.extend(edges)                 # collect for vector DB later
 
     # Finally, add all chunks, entities, and relations to vector DB
     if all_chunks:

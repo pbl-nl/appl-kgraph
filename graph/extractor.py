@@ -166,11 +166,19 @@ def parse_model_output(
             })
 
         elif tag == "relationship" and len(parts) >= 6:
-            # ("relationship", source, target, description, keywords, strength)
-            src, tgt, desc, keywords, strength = parts[1], parts[2], parts[3], parts[4], parts[5]
+            # Supported formats:
+            # 8-tuple: ("relationship", source_name, source_type, target_name, target_type, description, keywords, strength)
+            # 6-tuple: ("relationship", source_name, target_name, description, keywords, strength)
+            if len(parts) >= 8:
+                _, src, src_type, tgt, tgt_type, desc, keywords, strength = parts[:8]
+            else:
+                _, src, tgt, desc, keywords, strength = parts[:6]
+                src_type, tgt_type = "", ""  # no typed hints in legacy format
             relationships.append({
                 "source_name": src,
+                "source_type": src_type,
                 "target_name": tgt,
+                "target_type": tgt_type,
                 "description": desc,
                 "keywords": keywords,
                 "weight": _to_float_or_none(strength),

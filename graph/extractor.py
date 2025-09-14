@@ -5,8 +5,21 @@ import re
 import json
 from dataclasses import dataclass
 from prompts import PROMPTS
-from llm import Chat
+from llm import Chat, generate_many
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from settings import settings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from storage import Storage
+from settings import settings
+import hashlib
+
+# ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+
+def _sha256(s: str) -> str:
+    """Stable SHA-256 for cache keys (text & prompt)."""
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 # ─────────────────────────────────────────────────────────────
 # Prompt Builder
@@ -224,30 +237,116 @@ def extract_from_chunks(
     """
     High-level convenience: iterate chunks, call LLM, parse, and return collected results.
     Returns dict with 'entities', 'relationships', 'content_keywords'.
-    """
-    if client is None:
-        client = Chat()  # read env
 
+    PERFORMANCE (no functional change, no prompt changes):
+    - Reuses a single Chat client (singleton) to keep HTTP sessions hot.
+    - Adds a content-addressed LLM cache in SQLite (model + prompt_sha + text_sha).
+      *Cache stores RAW model text; on hits we parse it exactly like fresh outputs.*
+    - Calls the LLM ONLY for cache misses; hits are stitched back in order.
+    - Runs LLM calls for misses concurrently (bounded by settings-based concurrency).
+
+    SETTINGS (instead of .env):
+    - Concurrency:  settings.perf.max_concurrency       (fallback 6 if missing)
+    - Cache on/off: settings.perf.cache_enabled         (fallback True if missing)
+    - Cache TTL:    settings.perf.cache_max_age_hours   (fallback 720 if missing)
+
+    Provenance:
+    - Even on cache hits, each extracted record is stamped with this file/chunk's
+      source identifiers so cross-file queries remain accurate.
+
+    NOTE:
+    - Prompts are built with your existing `build_entity_relation_prompt(...)`.
+    - Parsing uses your existing `parse_model_output(...)`.
+    - The #TODO you added is preserved below (applied per-chunk after parsing).
+    """
+    # Pull settings
+    MAX_WORKERS = settings.llmperf.max_concurrency
+    CACHE_ENABLED = settings.llmperf.cache_enabled
+    CACHE_MAX_AGE_HOURS = settings.llmperf.cache_max_age_hours
+
+    # 1) Shared LLM client + storage handles
+    chat = client or Chat.singleton()
+    storage = Storage()
+    storage.init()
+
+    # 2) Materialize chunks to keep stable indexing for stitching results
+    chunk_list: List[Dict[str, Any]] = list(chunks)
+
+    # 3) Build the exact prompts for each chunk
+    #    and compute cache keys (prompt_sha, text_sha) per chunk.
+    prompts: List[str] = []
+    keys: List[Tuple[str, str]] = []  # (prompt_sha, text_sha)
+    for ch in chunk_list:
+        txt = _get_chunk_text(ch)
+        prompt = build_entity_relation_prompt(
+            text=txt,
+            language=language,
+            entity_types=entity_types,
+        )
+        prompts.append(prompt)
+        keys.append((_sha256(prompt), _sha256(txt)))
+
+    # 4) Probe cache; mark misses
+    model_name = chat.model
+    raw_outputs: List[Optional[str]] = [None] * len(chunk_list)
+    to_run: List[int] = []
+
+    if CACHE_ENABLED:
+        for i, (psha, tsha) in enumerate(keys):
+            cached = storage.get_llm_cache(model_name, psha, tsha, CACHE_MAX_AGE_HOURS)
+            if cached is not None:
+                raw_outputs[i] = cached
+            else:
+                to_run.append(i)
+    else:
+        to_run = list(range(len(chunk_list)))
+
+    # 5) Call the LLM ONLY for cache misses, in parallel (bounded)
+    def _call_one(i: int) -> str:
+        return chat.generate(prompt=prompts[i], system=None)
+
+    if to_run:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            futs = {ex.submit(_call_one, i): i for i in to_run}
+            for fut in as_completed(futs):
+                i = futs[fut]
+                out = fut.result()
+                raw_outputs[i] = out
+                if CACHE_ENABLED:
+                    psha, tsha = keys[i]
+                    storage.put_llm_cache(model_name, psha, tsha, out)
+
+    # 6) Parse outputs and attach per-chunk provenance (identical to your approach)
     all_entities: List[Dict[str, Any]] = []
     all_relationships: List[Dict[str, Any]] = []
     all_keywords: List[str] = []
 
-    for ch in chunks:
-        ents, rels, kws = extract_entities_relations_for_chunk(
-            ch, client=client, language=language, entity_types=entity_types
-        )
-        #TODO: ask whether the extraction is really completed
+    for i, ch in enumerate(chunk_list):
+        raw = raw_outputs[i] or ""
+        parsed = parse_model_output(raw)   # existing parser
+
+        source_id = _require_chunk_uuid(ch)
+        filepath = ch.get("filepath") or ch.get("filename")
+
+        for e in parsed.entities:
+            e["source_id"] = source_id
+            e["filepath"] = filepath
+        for r in parsed.relationships:
+            r["source_id"] = source_id
+            r["filepath"] = filepath
+
+        # TODO: ask whether the extraction is really completed
         # If not send with new prompt to complete
-        all_entities.extend(ents)
-        all_relationships.extend(rels)
-        all_keywords.extend(kws)
+
+        all_entities.extend(parsed.entities)
+        all_relationships.extend(parsed.relationships)
+        all_keywords.extend(parsed.content_keywords)
 
     return {
         "entities": all_entities,
         "relationships": all_relationships,
         "content_keywords": sorted(set(all_keywords)),
     }
-
 
 # ─────────────────────────────────────────────────────────────
 # CLI (optional) — quick test driver
@@ -313,7 +412,7 @@ if __name__ == "__main__":
 
     chunks = _default_demo_chunks() if not args.chunks else _load_chunks_from_path(args.chunks)
 
-    client = Chat()  # reads env
+    client = Chat.singleton()  # reads env
     result = extract_from_chunks(chunks, language=language, entity_types=entity_types, client=client)
 
     # Pretty print

@@ -84,9 +84,17 @@ class ChatGenerationSettings:
     """
     Default knobs for chat completions used across the app.
     """
-    temperature: float = 0.1
+    temperature: float = 0.0
     max_tokens: int = 2048
 
+@dataclass(frozen=True)
+class LLMPerformanceSettings:
+    """
+    Performance-related knobs for LLM calls.
+    """
+    max_concurrency: int = 6              # num of parallel requests
+    cache_enabled: bool = True
+    cache_max_age_hours: int = 720        # 30 days
 
 @dataclass(frozen=True)
 class EmbeddingSettings:
@@ -95,7 +103,6 @@ class EmbeddingSettings:
     (Model names come from ProviderSettings; this holds cross-cutting knobs.)
     """
     batch_size: int = 64
-
 
 @dataclass(frozen=True)
 class PromptFormattingSettings:
@@ -109,7 +116,6 @@ class PromptFormattingSettings:
     completion_delimiter: str = "<|COMPLETE|>"
     default_entity_types: List[str] = None  # filled in loader
 
-
 @dataclass(frozen=True)
 class IngestionMergeSettings:
     """
@@ -120,7 +126,6 @@ class IngestionMergeSettings:
     delimiter: str = "||"
     description_segment_limit: int = 5
 
-
 @dataclass(frozen=True)
 class ChunkingSettings:
     """
@@ -130,7 +135,6 @@ class ChunkingSettings:
     overlap_chars: int = 200
     include_overlap_in_limit: bool = True
     join_with: str = " "
-
 
 @dataclass(frozen=True)
 class StoragePaths:
@@ -145,7 +149,6 @@ class StoragePaths:
     chroma_entities: str = "./storage/chroma_entities"
     chroma_relations: str = "./storage/chroma_relations"
 
-
 @dataclass(frozen=True)
 class Settings:
     """
@@ -153,12 +156,12 @@ class Settings:
     """
     provider: ProviderSettings
     chat: ChatGenerationSettings
+    llmperf: LLMPerformanceSettings
     embeddings: EmbeddingSettings
     prompts: PromptFormattingSettings
     ingestion: IngestionMergeSettings
     chunking: ChunkingSettings
     storage: StoragePaths
-
 
 # ─────────────────────────────────────────────────────────────
 # Loader / validator
@@ -209,8 +212,14 @@ def load_settings() -> Settings:
             raise RuntimeError(f"When LLM_PROVIDER=azure, set required variables: {', '.join(missing)}")
 
     chat = ChatGenerationSettings(
-        temperature=env_float("CHAT_TEMPERATURE", 0.1),
+        temperature=env_float("CHAT_TEMPERATURE", 0.0),
         max_tokens=env_int("CHAT_MAX_TOKENS", 2048),
+    )
+
+    llmperf = LLMPerformanceSettings(
+        max_concurrency=env_int("LLM_MAX_CONCURRENCY", 6),
+        cache_enabled=env_bool("LLM_CACHE_ENABLED", True),
+        cache_max_age_hours=env_int("LLM_CACHE_MAX_AGE_HOURS", 720),
     )
 
     embeddings = EmbeddingSettings(
@@ -252,6 +261,7 @@ def load_settings() -> Settings:
     return Settings(
         provider=provider,
         chat=chat,
+        llmperf=llmperf,
         embeddings=embeddings,
         prompts=prompts,
         ingestion=ingestion,

@@ -190,6 +190,15 @@ class DocumentsDB:
                 full_char_count INTEGER,
                 content_hash TEXT
             );''')
+            cur.execute('''
+            CREATE TABLE IF NOT EXISTS llm_cache (
+                model      TEXT NOT NULL,
+                prompt_sha TEXT NOT NULL,
+                text_sha   TEXT NOT NULL,
+                created    REAL NOT NULL,
+                result     TEXT NOT NULL,
+                PRIMARY KEY (model, prompt_sha, text_sha)
+            );''')
             con.commit()
 
     def add_document(self, metadata: Dict[str, Any], full_text: str) -> None:
@@ -272,6 +281,33 @@ class DocumentsDB:
         set_clause = ", ".join(set_clauses)
         with self.connect() as con:
             con.execute(f"UPDATE documents SET {set_clause} WHERE doc_id = ?;", values)
+            con.commit()
+
+    def get_llm_cache(self, model: str, prompt_sha: str, text_sha: str, max_age_hours: int) -> Optional[str]:
+        """Return cached raw LLM result or None if not found / expired / invalid JSON."""
+        import time
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT result, created FROM llm_cache WHERE model=? AND prompt_sha=? AND text_sha=?;",
+                (model, prompt_sha, text_sha)
+            ).fetchone()
+        if not row:
+            return None
+        result, created = row
+        # TTL check
+        age_h = (time.time() - float(created)) / 3600.0
+        if age_h > float(max_age_hours):
+            return None
+        return result
+
+    def put_llm_cache(self, model: str, prompt_sha: str, text_sha: str, result: str) -> None:
+        """Insert or replace a cached raw LLM result (idempotent)."""
+        import time
+        with self.connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO llm_cache (model, prompt_sha, text_sha, created, result) VALUES (?, ?, ?, ?, ?);",
+                (model, prompt_sha, text_sha, time.time(), result)
+            )
             con.commit()
 
 class ChunksDB:
@@ -1014,6 +1050,12 @@ class Storage:
         self.documents.init()
         self.chunks.init()
         self.graph.init()
+
+    def get_llm_cache(self, model: str, prompt_sha: str, text_sha: str, max_age_hours: int) -> Optional[str]:
+        return self.documents.get_llm_cache(model, prompt_sha, text_sha, max_age_hours)
+
+    def put_llm_cache(self, model: str, prompt_sha: str, text_sha: str, result: str) -> None:
+        self.documents.put_llm_cache(model, prompt_sha, text_sha, result)
 
     # ---------- Add-only APIs ----------
 

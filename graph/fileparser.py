@@ -99,7 +99,13 @@ class FileParser:
     
     def _parse_html_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """Parse HTML files"""
-        loader = BSHTMLLoader(filepath, open_encoding='utf-8')
+        bs_kwargs = {"features": "lxml"}  # Use lxml parser if available
+        try:
+            loader = BSHTMLLoader(filepath, bs_kwargs=bs_kwargs)
+        except Exception:
+            # Fallback to default parser if lxml not available
+            print("lxml parser not available, falling back to default HTML parser")
+            loader = BSHTMLLoader(filepath, open_encoding='utf-8')
         data = loader.load()
         raw_text = data[0].page_content.replace('\n', '')
         pages = [(0, raw_text)]

@@ -226,7 +226,7 @@ def chunk_parsed_pages(
 
     return chunks
 
-
+# !! Currently not used, but could be used for unit testing.
 def chunk_text(
     text: str,
     max_chars: int = settings.chunking.max_chars,

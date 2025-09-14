@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import os
-import re
-import json
-from dataclasses import dataclass
-from dotenv import load_dotenv
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from prompts import PROMPTS
 from settings import settings
@@ -96,6 +91,7 @@ def llm_summarize_text(to_summarize: str, language: str = "English") -> str:
     prompt = PROMPTS["summarize_text"].format(text=to_summarize, language=language)
     return chat.generate(prompt).strip()
 
+# !! Currently not in use, but could be useful for batch operations. !!
 def generate_many(prompts_and_systems: List[Tuple[str, Optional[str]]],
                   max_workers: Optional[int] = None) -> List[str]:
     """

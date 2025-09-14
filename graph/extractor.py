@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import os
 import re
 import json
 from dataclasses import dataclass
 from prompts import PROMPTS
-from llm import Chat, generate_many
+from llm import Chat
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from settings import settings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from storage import Storage
-from settings import settings
 import hashlib
 
 # ─────────────────────────────────────────────────────────────
@@ -177,7 +175,6 @@ def parse_model_output(
         raw_records=recs,
     )
 
-
 # ─────────────────────────────────────────────────────────────
 # Public extraction API (chunk-by-chunk + batch)
 # ─────────────────────────────────────────────────────────────
@@ -194,7 +191,7 @@ def _require_chunk_uuid(chunk: Dict[str, Any]) -> str:
         raise KeyError("Each chunk MUST include 'chunk_uuid' (used as source_id).")
     return str(chunk["chunk_uuid"])
 
-
+# !! Currently not used, but could be useful for single-chunk extraction
 def extract_entities_relations_for_chunk(
     chunk: Dict[str, Any],
     client: Chat,
@@ -226,7 +223,6 @@ def extract_entities_relations_for_chunk(
         r["filepath"] = filepath
 
     return parsed.entities, parsed.relationships, parsed.content_keywords
-
 
 def extract_from_chunks(
     chunks: Iterable[Dict[str, Any]],

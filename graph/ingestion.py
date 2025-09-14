@@ -22,10 +22,6 @@ class FileStats:
     size: int
     mtime: float
 
-def compute_file_stats(path: Path) -> FileStats:
-    st = os.stat(path)
-    return FileStats(size=st.st_size, mtime=st.st_mtime)
-
 def normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     # Lower-case keys, unify language key
     meta = {str(k).lower(): v for k, v in (meta or {}).items()}

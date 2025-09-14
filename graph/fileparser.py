@@ -221,28 +221,3 @@ class FileParser:
 
         return pdf_path
 
-    
-# Example usage and utility functions
-def parse_multiple_files(filepaths: List[Union[str, Path]]) -> Dict[str, Tuple[List[Tuple[int, str]], Dict[str, Any]]]:
-    """
-    Parse multiple files and return results in a dictionary.
-    
-    Args:
-        filepaths: List of file paths to parse
-        
-    Returns:
-        Dictionary mapping filepath to (pages, metadata) tuple
-    """
-    parser = FileParser()
-    results = {}
-    
-    for filepath in filepaths:
-        try:
-            pages, metadata = parser.parse_file(filepath)
-            results[str(filepath)] = (pages, metadata)
-        except Exception as e:
-            results[str(filepath)] = ([], {'error': str(e)})
-    
-    return results
-
-

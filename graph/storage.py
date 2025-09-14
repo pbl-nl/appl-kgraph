@@ -1051,10 +1051,13 @@ class Storage:
         self.chunks = ChunksDB(paths.chunks_db)
         self.graph = GraphDB(paths.graph_db)
 
-        # Vector DBs (each in its own persistent directory => separate DBs)
-        self.chunk_vectors = ChunkVectors(collection="chunks", chroma_dir=paths.chroma_chunks, embedder=embedder)
-        self.entity_vectors = EntityVectors(collection="entities", chroma_dir=paths.chroma_entities, embedder=embedder)
-        self.relation_vectors = RelationVectors(collection="relations", chroma_dir=paths.chroma_relations, embedder=embedder)
+        # Embedder (shared)
+        self.embedder = embedder or Embedder()
+
+        # Vector DBs (each in its own persistent directory => separate DBs) but same embedder.
+        self.chunk_vectors = ChunkVectors(collection="chunks", chroma_dir=paths.chroma_chunks, embedder=self.embedder)
+        self.entity_vectors = EntityVectors(collection="entities", chroma_dir=paths.chroma_entities, embedder=self.embedder)
+        self.relation_vectors = RelationVectors(collection="relations", chroma_dir=paths.chroma_relations, embedder=self.embedder)
 
     def init(self):
         """Create tables/collections if they don't exist yet."""

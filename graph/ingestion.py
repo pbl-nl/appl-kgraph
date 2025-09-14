@@ -101,102 +101,151 @@ def build_chunks(
 # sometimes LLM generated descriptions or former versions may have trailing punctuation like .,;! etc.
 
 def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    grouped = defaultdict(list)
+    """
+    Consolidate entity nodes by the (name, type) key, merging duplicates across chunks/files,
+    and fold in any already-stored rows **in bulk** (single DB round-trip).
+    """
+    delim = settings.ingestion.delimiter
+    # 1) group incoming by (name, type)
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for n in nodes:
-        grouped[n["name"]].append({
-            "type": n["type"],
-            "description": n["description"],
-            "source_id": n["source_id"],
-            "filepath": n["filepath"],
+        name = str(n["name"]).strip()
+        etype = str(n["type"]).strip()
+        grouped[(name, etype)].append({
+            "description": n.get("description", "") or "",
+            "source_id": n.get("source_id", "") or "",
+            "filepath": n.get("filepath", "") or "",
         })
-    # append existing nodes from storage
-    for name in list(grouped.keys()):
-        existing = storage.get_node(name=name)
-        if existing:
-            grouped[name].append({
-                "type": existing.get("type", ""),
-                "description": existing.get("description", ""),
-                "source_id": existing.get("source_id", ""),
-                "filepath": existing.get("filepath", ""),
-                })
-
-    for name in list(grouped.keys()):
-        attrs = grouped[name]
-        # Choose the most common type if multiple and try to avoid empty/None types if possible
-        # which can happen when adding edges with inexisting nodes in graph
-        types = [a["type"] for a in attrs]
-        known_types = [t for t in types if t and str(t).strip()]
-        most_common_type, _ = Counter(known_types or types).most_common(1)[0]
-        t = most_common_type
-        descriptions = settings.ingestion.delimiter.join({d.strip() for a in attrs if a.get("description") for d in a.get("description").split(settings.ingestion.delimiter)})
-        source_ids = settings.ingestion.delimiter.join({s.strip() for a in attrs if a.get("source_id") for s in a.get("source_id").split(settings.ingestion.delimiter)})
-        filepaths = settings.ingestion.delimiter.join({f.strip() for a in attrs if a.get("filepath") for f in a.get("filepath").split(settings.ingestion.delimiter)})
-        grouped[name] = {
-                "name": name,
-                "type": t,
-                "description": descriptions,
-                "source_id": source_ids,
-                "filepath": filepaths
-            }
-    grouped = list(grouped.values())
-    return grouped
+    # 2) bulk fetch existing rows for all names, then merge by (name, type)
+    names = sorted({k[0] for k in grouped.keys()})
+    if names:
+        existing_rows = storage.get_nodes(names) or []
+        for row in existing_rows:
+            key = (row.get("name", "").strip(), row.get("type", "").strip())
+            grouped[key].append({
+                "description": row.get("description", "") or "",
+                "source_id": row.get("source_id", "") or "",
+                "filepath": row.get("filepath", "") or "",
+            })
+    # 3) collapse each (name, type) group into a single merged record
+    merged: List[Dict[str, Any]] = []
+    for (name, etype), attrs in grouped.items():
+        def join(field: str) -> str:
+            parts = []
+            for a in attrs:
+                v = (a.get(field, "") or "")
+                if v:
+                    parts.extend(p.strip() for p in v.split(delim) if p.strip())
+            # stable dedupe
+            uniq = []
+            seen = set()
+            for p in parts:
+                if p not in seen:
+                    seen.add(p)
+                    uniq.append(p)
+            return delim.join(uniq)
+        merged.append({
+            "name": name,
+            "type": etype,  # keep exact key's type (no "most_common" voting)
+            "description": join("description"),
+            "source_id": join("source_id"),
+            "filepath": join("filepath"),
+        })
+    return merged
 
 
 def group_edges(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Group edges by normalized (source_name, target_name), merge duplicates,
-    append existing stored edge (if any), and return a flat list.
+    Consolidate relation edges by normalized undirected (source_name, target_name),
+    merge duplicates across chunks/files, and blend in any already-stored rows via
+    a single bulk fetch.
 
-    Input edge schema (expected keys):
-      - source_name, target_name, weight (optional/number), description, keywords,
-        source_id, filepath
+    Input edge schema (expected keys on each dict):
+      - source_name (str), target_name (str), weight (number|None, optional),
+        description (str, optional), keywords (str, optional), source_id (str, optional),
+        filepath (str, optional)
+
+    Steps:
+      1) Normalize each (source, target) to a canonical undirected pair and accumulate attributes.
+      2) Bulk-fetch any existing edges for ALL pairs (storage.get_edges) and inject their attrs
+         into the same groups to preserve/merge prior state.
+      3) For each pair, merge text fields using the configured delimiter, sum weights (ignoring None),
+         and return a flat list of normalized edge dicts.
+
+    Notes:
+      - Keywords provided as comma-separated strings are normalized once into delimiter-joined sets.
+      - Uses _normalize_pair() to ensure undirected uniqueness is consistent with the DB/vector IDs.
     """
-    grouped = defaultdict(list)
+    delim = settings.ingestion.delimiter
 
-    # 1) accumulate incoming edges by normalized pair
+    # 1) group incoming by normalized undirected pair
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for e in edges:
-        a, b = e["source_name"], e["target_name"]
-        src, tgt = _normalize_pair(a, b)
+        src, tgt = _normalize_pair(e["source_name"], e["target_name"])
         grouped[(src, tgt)].append({
-            "description": e.get("description", ""),
-            "keywords": settings.ingestion.delimiter.join({k.strip() for k in e.get("keywords", "").split(',') if k.strip()}),
-            "weight": float(e.get("weight", 0)),      # may be None or number
-            "source_id": e.get("source_id", ""),
-            "filepath": e.get("filepath", "")
+            "description": e.get("description", "") or "",
+            # normalize comma-separated input, keep unique tokens only
+            "keywords": delim.join({k.strip() for k in (e.get("keywords", "") or "").split(",") if k.strip()}),
+            "weight": float(e["weight"]) if e.get("weight") is not None else None,
+            "source_id": e.get("source_id", "") or "",
+            "filepath": e.get("filepath", "") or "",
         })
 
-    # 2) append existing edges from storage (if present)
-    for (src, tgt) in list(grouped.keys()):
-        existing = storage.get_edge(source_name=src, target_name=tgt)
-        if existing:
-            grouped[(src, tgt)].append({
-                "description": existing.get("description", ""),
-                "keywords": existing.get("keywords", ""),
-                "weight": existing.get("weight", None),
-                "source_id": existing.get("source_id", ""),
-                "filepath": existing.get("filepath", "")
+    # 2) bulk fetch ALL existing edges once
+    pairs = list(grouped.keys())
+    if pairs:
+        existing_edges = storage.get_edges(pairs) or []
+        for ex in existing_edges:
+            u_src, u_tgt = _normalize_pair(ex["source_name"], ex["target_name"])
+            grouped[(u_src, u_tgt)].append({
+                "description": ex.get("description", "") or "",
+                "keywords": ex.get("keywords", "") or "",
+                "weight": ex.get("weight", 0),
+                "source_id": ex.get("source_id", "") or "",
+                "filepath": ex.get("filepath", "") or "",
             })
 
     # 3) collapse each pair's attrs into one merged record
-    merged = []
+    merged: List[Dict[str, Any]] = []
     for (src, tgt), attrs in grouped.items():
-        descriptions = settings.ingestion.delimiter.join({d.strip() for a in attrs if a.get("description") for d in a["description"].split(settings.ingestion.delimiter)})
-        keywords     = settings.ingestion.delimiter.join({k.strip() for a in attrs if a.get("keywords") for k in a["keywords"].split(settings.ingestion.delimiter) if k.strip()})
-        weights      = sum([a["weight"]  for a in attrs if a.get("weight") is not None])
-        source_ids   = settings.ingestion.delimiter.join({a["source_id"]    for a in attrs if a.get("source_id")})
-        filepaths    = settings.ingestion.delimiter.join({a["filepath"]     for a in attrs if a.get("filepath")})
+        desc = delim.join({
+            s.strip()
+            for a in attrs
+            for s in (a.get("description", "") or "").split(delim)
+            if s.strip()
+        })
+        kws = delim.join({
+            k.strip()
+            for a in attrs
+            for k in (a.get("keywords", "") or "").split(delim)
+            if k.strip()
+        })
+        w_sum = sum(a["weight"] for a in attrs if a.get("weight") is not None)
+        srcs = delim.join({
+            s.strip()
+            for a in attrs
+            for s in (a.get("source_id", "") or "").split(delim)
+            if s.strip()
+        })
+        fps = delim.join({
+            s.strip()
+            for a in attrs
+            for s in (a.get("filepath", "") or "").split(delim)
+            if s.strip()
+        })
 
         merged.append({
             "source_name": src,
             "target_name": tgt,
-            "description": descriptions,
-            "keywords": keywords,
-            "weight": weights,
-            "source_id": source_ids,
-            "filepath": filepaths
+            "description": desc,
+            "keywords": kws,
+            "weight": w_sum,
+            "source_id": srcs,
+            "filepath": fps,
         })
 
     return merged
+
 
 
 def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations: List[Dict[str, Any]]):
@@ -220,22 +269,36 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
 
 
 def fill_missing_nodes(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Ensures all nodes referenced in edges exist in storage, adding minimal info if needed."""
-    node_names = defaultdict(list)
-    for edge in edges:
-        for name in [edge["source_name"], edge["target_name"]]:
-            node_names[name].append({"source_id": edge["source_id"], "filepath": edge["filepath"]})
-    # Merge multiple source_id/filepath entries per node name
-    node_names = {name: {"source_id": settings.ingestion.delimiter.join({info["source_id"] for info in infos}),
-                        "filepath": settings.ingestion.delimiter.join({info["filepath"] for info in infos})}
-                    for name, infos in node_names.items()}
-
-    added_nodes = []
-    for name, info in node_names.items():
-        if not storage.get_node(name=name):
-            storage.upsert_nodes([{"name": name, "type": "", "description": "", "source_id": info["source_id"], "filepath": info["filepath"]}])
-            added_nodes.append({"name": name, "type": "", "description": "", "source_id": info["source_id"], "filepath": info["filepath"]})
-    return added_nodes
+    """
+    Ensure all names referenced by edges exist as nodes. Because relationships currently
+    carry *names only*, we conservatively create a placeholder node per name with
+    type='unknown' when no node for that (name, 'unknown') exists yet.
+    """
+    delim = settings.ingestion.delimiter
+    by_name: Dict[str, Dict[str, set]] = defaultdict(lambda: {"source_id": set(), "filepath": set()})
+    for e in edges:
+        for nm in (e["source_name"], e["target_name"]):
+            if e.get("source_id"):
+                by_name[nm]["source_id"].add(e["source_id"])
+            if e.get("filepath"):
+                by_name[nm]["filepath"].add(e["filepath"])
+    names = list(by_name.keys())
+    existing = storage.get_nodes(names) if names else []
+    existing_pairs = {(row["name"], row["type"]) for row in existing}
+    to_add: List[Dict[str, Any]] = []
+    for name, meta in by_name.items():
+        pair = (name, "unknown")
+        if pair not in existing_pairs:
+            to_add.append({
+                "name": name,
+                "type": "unknown",
+                "description": "",
+                "source_id": delim.join(sorted(meta["source_id"])) if meta["source_id"] else "",
+                "filepath": delim.join(sorted(meta["filepath"])) if meta["filepath"] else "",
+            })
+    if to_add:
+        storage.upsert_nodes(to_add)
+    return to_add
 
 def ingest_paths(paths: List[Path]):
     """Ingests files at given paths into the storage system."""

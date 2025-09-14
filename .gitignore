@@ -72,5 +72,9 @@ secrets.ini
 *.json
 config.py
 
+# Project-specific ignores
+*.sqlite
+*.sqlite3
+
 # Git directory
 .git

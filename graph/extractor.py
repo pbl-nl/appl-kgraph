@@ -29,21 +29,29 @@ def build_entity_relation_prompt(
     entity_types: Optional[Iterable[str]] = None,
 ) -> str:
     """
-    Fill PROMPTS['entity_extraction'] for a single chunk of text, using your examples and delimiters.
+    Fill PROMPTS['entity_extraction'] for a single chunk of text. Also formats the
+    examples so they DO NOT contain '{record_delimiter}' literals.
     """
+    # 1) Base context for the prompt (without examples yet)
     examples = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
     ctx = dict(
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         record_delimiter=PROMPTS["DEFAULT_RECORD_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
         entity_types=", ".join(entity_types) if entity_types else ", ".join(PROMPTS["DEFAULT_ENTITY_TYPES"]),
-        examples=examples,
+        examples="",
         language=language or PROMPTS["DEFAULT_LANGUAGE"],
         input_text=text,
     )
+
+    # 2) Join & format the examples with the SAME ctx so placeholders are replaced
+    examples_template = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
+    examples = examples_template.format(**ctx)  # fill in delimiters, entity_types, language
+    ctx["examples"] = examples
+
+    # 3) Finally format the main template
     template = PROMPTS["entity_extraction"]
     return template.format(**ctx)
-
 
 # ─────────────────────────────────────────────────────────────
 # Parsing utilities (regex + delimiter tolerant)
@@ -107,12 +115,21 @@ def parse_model_output(
       ("entity"<|>"name"<|>"type"<|>"description")
       ("relationship"<|>"source"<|>"target"<|>"description"<|>"keywords"<|>"strength")
       ("content_keywords"<|>"kw1, kw2, ...")
+
+    Tolerates both real delimiters and accidental literal
+    '{record_delimiter}' / '{tuple_delimiter}' tokens from the model.
     """
     tuple_delim = tuple_delim or PROMPTS["DEFAULT_TUPLE_DELIMITER"]
     record_delim = record_delim or PROMPTS["DEFAULT_RECORD_DELIMITER"]
     completion_delim = completion_delim or PROMPTS["DEFAULT_COMPLETION_DELIMITER"]
 
     raw = _normalize_quotes(raw)
+
+    # Defensive: handles examples that slipped through or model echoes
+    raw = raw.replace("{tuple_delimiter}", tuple_delim) \
+             .replace("{record_delimiter}", record_delim) \
+             .replace("{completion_delimiter}", completion_delim)
+    
 
     # Truncate at completion delimiter if present
     if completion_delim in raw:
@@ -299,7 +316,7 @@ def extract_from_chunks(
 
     # 5) Call the LLM ONLY for cache misses, in parallel (bounded)
     def _call_one(i: int) -> str:
-        return chat.generate(prompt=prompts[i], system=None)
+        return chat.generate(prompt=prompts[i], system="You extract entities and relationships precisely in the required format. Do not add commentary.")
 
     if to_run:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:

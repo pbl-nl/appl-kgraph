@@ -8,14 +8,13 @@ from contextlib import contextmanager
 from dataclasses import replace
 from dotenv import load_dotenv
 from openai import OpenAI, AzureOpenAI
-try:
+try:  # pragma: no cover - import guard for optional dependency
     import chromadb  # type: ignore
-except ImportError:  # pragma: no cover - optional dependency
-    chromadb = None  # type: ignore
-try:
-    from settings import settings  # type: ignore
-except ImportError:  # pragma: no cover - allow package-relative import
-    from .settings import settings  # type: ignore
+except ImportError as _chromadb_exc:  # pragma: no cover - executed when dependency missing
+    chromadb = None  # type: ignore[assignment]
+    _CHROMADB_IMPORT_ERROR: Optional[ImportError] = _chromadb_exc
+else:
+    _CHROMADB_IMPORT_ERROR = None
 from settings import settings, StoragePaths as SettingsStoragePaths
 
 # ---------------------------
@@ -736,15 +735,12 @@ class GraphDB:
 
 class _ChromaBase:
     def __init__(self, collection: str, chroma_dir: str, embedder: Optional[Embedder] = None):
-        self._use_fallback = chromadb is None
-        self._memory: Dict[str, Dict[str, Any]] = {}
-        self._chroma_dir = chroma_dir
-
-        if self._use_fallback:
-            self.client = None
-            self.col = None
-            self.embedder = None
-            return
+        if chromadb is None:
+            if _CHROMADB_IMPORT_ERROR is not None:
+                raise RuntimeError(
+                    "chromadb is required for vector storage. Install it with `pip install chromadb`."
+                ) from _CHROMADB_IMPORT_ERROR
+            raise RuntimeError("chromadb is required for vector storage. Install it with `pip install chromadb`.")
 
         _ensure_dir_for(os.path.join(chroma_dir, ".sentinel"))
         self.client = chromadb.PersistentClient(path=chroma_dir)  # type: ignore

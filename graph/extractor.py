@@ -287,8 +287,16 @@ def extract_from_chunks(
 
     # 1) Shared LLM client + storage handles
     chat = client or Chat.singleton()
-    storage = Storage()
-    storage.init()
+    storage: Optional[Storage]
+    try:
+        storage = Storage()
+    except RuntimeError as exc:
+        if "chromadb" in str(exc).lower():
+            storage = None
+        else:
+            raise
+    else:
+        storage.init()
 
     # 2) Materialize chunks to keep stable indexing for stitching results
     chunk_list: List[Dict[str, Any]] = list(chunks)
@@ -312,7 +320,7 @@ def extract_from_chunks(
     raw_outputs: List[Optional[str]] = [None] * len(chunk_list)
     to_run: List[int] = []
 
-    if CACHE_ENABLED:
+    if CACHE_ENABLED and storage is not None:
         for i, (psha, tsha) in enumerate(keys):
             cached = storage.get_llm_cache(model_name, psha, tsha, CACHE_MAX_AGE_HOURS)
             if cached is not None:
@@ -333,7 +341,7 @@ def extract_from_chunks(
                 i = futs[fut]
                 out = fut.result()
                 raw_outputs[i] = out
-                if CACHE_ENABLED:
+                if CACHE_ENABLED and storage is not None:
                     psha, tsha = keys[i]
                     storage.put_llm_cache(model_name, psha, tsha, out)
 

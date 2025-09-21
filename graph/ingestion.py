@@ -103,11 +103,61 @@ def _resolve_type(votes: Counter, existing_type: str = "") -> str:
     existing = (existing_type or "").strip()
     if not votes:
         return existing or "unknown"
-    max_count = max(votes.values())
-    contenders = sorted([t for t, c in votes.items() if c == max_count])
-    if existing and existing in contenders:
+
+    normalized: Dict[str, int] = {}
+    canonical: Dict[str, str] = {}
+    for raw_type, count in votes.items():
+        candidate = (raw_type or "").strip()
+        if not candidate or candidate.lower() == "unknown":
+            continue
+        key = candidate.lower()
+        normalized[key] = normalized.get(key, 0) + count
+        canonical.setdefault(key, candidate)
+
+    if normalized:
+        max_count = max(normalized.values())
+        contenders = sorted([k for k, c in normalized.items() if c == max_count])
+        existing_key = existing.lower()
+        for key in contenders:
+            if existing and existing_key == key:
+                return canonical[key]
+        return canonical[contenders[0]]
+
+    if existing and existing.lower() != "unknown":
         return existing
-    return contenders[0] if contenders else (existing or "unknown")
+
+    # All votes were unknown or empty; default to unknown to avoid oscillation.
+    return "unknown"
+
+
+def dedupe_entities_for_vectors(entities: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return entities deduplicated by name, preferring typed entries over "unknown"."""
+
+    dedup: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    for ent in entities or []:
+        name = str(ent.get("name", "") or "").strip()
+        if not name:
+            continue
+
+        current = dedup.get(name)
+        if current is None:
+            dedup[name] = ent
+            order.append(name)
+            continue
+
+        current_type = str(current.get("type", "") or "").strip().lower()
+        new_type = str(ent.get("type", "") or "").strip().lower()
+
+        if current_type == "unknown" and new_type and new_type != "unknown":
+            dedup[name] = ent
+        elif new_type == "unknown" and current_type and current_type != "unknown":
+            continue
+        else:
+            dedup[name] = ent
+
+    return [dedup[name] for name in order]
 
 
 def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -438,8 +488,11 @@ def ingest_paths(paths: List[Path]):
     # Finally, add all chunks, entities, and relations to vector DB
     if all_chunks:
         storage.upsert_chunk_vector(all_chunks)
-        storage.upsert_entity_vector(all_entities)
-        storage.upsert_relation_vector(all_relations)
+        deduped_entities = dedupe_entities_for_vectors(all_entities)
+        if deduped_entities:
+            storage.upsert_entity_vector(deduped_entities)
+        if all_relations:
+            storage.upsert_relation_vector(all_relations)
 
         #TODO: Add a node for filename/document with edges to all entities/relations extracted from it.
 

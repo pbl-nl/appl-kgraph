@@ -818,59 +818,23 @@ class _ChromaBase:
 
     def _add(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]):
         metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]
-        if self._use_fallback:
-            for id_, text, meta in zip(ids, texts, metadatas):
-                self._memory[id_] = {"document": text, "metadata": meta}
-            return
         embeddings = self.embedder.embed_texts(texts)
         self.col.add(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def _get(self, ids: List[str]) -> List[Dict[str, Any]]:
-        if self._use_fallback:
-            out: List[Dict[str, Any]] = []
-            for id_ in ids:
-                entry = self._memory.get(id_)
-                if entry is None:
-                    continue
-                out.append({
-                    "ids": [id_],
-                    "documents": [entry.get("document", "")],
-                    "metadatas": [entry.get("metadata", {})],
-                })
-            return out
         res = self.col.get(ids=ids, include=["documents", "metadatas"])
         return self.to_list(res)
 
     def _delete(self, ids: List[str]) -> None:
-        if self._use_fallback:
-            for id_ in ids:
-                self._memory.pop(id_, None)
-            return
         self.col.delete(ids=ids)
 
     def _upsert(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]) -> None:
         metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]
-        if self._use_fallback:
-            for id_, text, meta in zip(ids, texts, metadatas):
-                self._memory[id_] = {"document": text, "metadata": meta}
-            return
         embeddings = self.embedder.embed_texts(texts)
         self.col.upsert(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def _query(self, texts: List[str], n_results: int, where: Optional[Dict[str, Any]] = None,
                where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        if self._use_fallback:
-            out: List[Dict[str, Any]] = []
-            for idx, (id_, entry) in enumerate(self._memory.items()):
-                if idx >= n_results:
-                    break
-                out.append({
-                    "ids": [id_],
-                    "documents": [entry.get("document", "")],
-                    "metadatas": [entry.get("metadata", {})],
-                    "distances": [0.0],
-                })
-            return out
         embeddings = self.embedder.embed_texts(texts)
         res = self.col.query(embeddings=embeddings, n_results=n_results, where=where,
                              where_document=where_document, include=["documents", "metadatas", "distances"])

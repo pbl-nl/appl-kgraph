@@ -427,10 +427,7 @@ def ingest_paths(paths: List[Path]):
         
         # Consolidate/merge entities (by (name,type)) and upsert those first
         entities_in = res.get("entities", []) or []
-        nodes = group_nodes(storage, entities_in)  # keeps (name,type) identity
-        if nodes:
-            storage.upsert_nodes(nodes)                 # write schema
-            all_entities.extend(nodes)                  # collect for vector DB later
+        edges_in = res.get("relationships", []) or []
 
         #  Ensure edge endpoints exist with refined "unknown" policy
         #    - If relationships carry source_type/target_type, ensure those exact (name,type) exist
@@ -438,13 +435,17 @@ def ingest_paths(paths: List[Path]):
         #        • 0 typed nodes for a name  -> create (name,"unknown")
         #        • >1 typed nodes for a name -> create (name,"unknown")
         #        • exactly 1 typed node      -> do nothing
-        edges_in = res.get("relationships", []) or []
         placeholders = ensure_edge_endpoints(storage, edges_in)
         if placeholders:
             all_entities.extend(placeholders)           # collect for vector DB later
 
+        nodes, edges = merge_graph_data(storage, entities_in, edges_in)
+
+        if nodes:
+            storage.upsert_nodes(nodes)                 # write schema
+            all_entities.extend(nodes)                  # collect for vector DB later
+
         # Group/merge edges and upsert
-        edges = group_edges(storage, edges_in)          # bulk-merge with existing edges
         if edges:
             storage.upsert_edges(edges)                 # write schema
             all_relations.extend(edges)                 # collect for vector DB later

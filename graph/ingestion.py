@@ -3,13 +3,13 @@ import mimetypes
 import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Sequence, Tuple, Optional
+from collections import Counter, defaultdict
+
 from storage import Storage, _normalize_pair
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
 from extractor import extract_from_chunks
-from collections import defaultdict
 from llm import llm_summarize_text
-from collections import Counter
 from settings import settings
 import os
 from dataclasses import dataclass
@@ -105,53 +105,89 @@ def build_chunks(
 # e.g. if a node description is "desc1||desc2||", it should be "desc1||desc2" after merging.
 # sometimes LLM generated descriptions or former versions may have trailing punctuation like .,;! etc.
 
+def _resolve_type(votes: Counter, existing_type: str = "") -> str:
+    existing = (existing_type or "").strip()
+    if not votes:
+        return existing or "unknown"
+    max_count = max(votes.values())
+    contenders = sorted([t for t, c in votes.items() if c == max_count])
+    if existing and existing in contenders:
+        return existing
+    return contenders[0] if contenders else (existing or "unknown")
+
+
 def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Consolidate entity nodes by the (name, type) key, merging duplicates across chunks/files,
-    and fold in any already-stored rows **in bulk** (single DB round-trip).
+    Consolidate entity nodes by name (unique key) and determine the final node type by
+    majority vote among all available hints (incoming + existing rows).
     """
+
     delim = settings.ingestion.delimiter
-    # 1) group incoming by (name, type)
-    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    grouped: Dict[str, Dict[str, Any]] = {}
+
     for n in nodes:
-        name = str(n["name"]).strip()
-        etype = str(n["type"]).strip()
-        grouped[(name, etype)].append({
+        name = str(n.get("name", "")).strip()
+        if not name:
+            continue
+        etype = str(n.get("type", "")).strip()
+        bucket = grouped.setdefault(name, {
+            "attrs": [],
+            "votes": Counter(),
+            "existing": None,
+        })
+        bucket["attrs"].append({
             "description": n.get("description", "") or "",
             "source_id": n.get("source_id", "") or "",
             "filepath": n.get("filepath", "") or "",
         })
-    # 2) bulk fetch existing rows for all names, then merge by (name, type)
-    names = sorted({k[0] for k in grouped.keys()})
+        vote_key = etype or "unknown"
+        bucket["votes"][vote_key] += 1
+
+    names = sorted(grouped.keys())
     if names:
         existing_rows = storage.get_nodes(names) or []
         for row in existing_rows:
-            key = (row.get("name", "").strip(), row.get("type", "").strip())
-            grouped[key].append({
+            name = str(row.get("name", "") or "").strip()
+            if not name:
+                continue
+            bucket = grouped.setdefault(name, {
+                "attrs": [],
+                "votes": Counter(),
+                "existing": None,
+            })
+            bucket["attrs"].append({
                 "description": row.get("description", "") or "",
                 "source_id": row.get("source_id", "") or "",
                 "filepath": row.get("filepath", "") or "",
             })
-    # 3) collapse each (name, type) group into a single merged record
+            existing_type = str(row.get("type", "") or "").strip()
+            bucket["votes"][existing_type or "unknown"] += 1
+            bucket["existing"] = row
+
     merged: List[Dict[str, Any]] = []
-    for (name, etype), attrs in grouped.items():
+    for name, data in grouped.items():
+        existing_type = ""
+        if data.get("existing"):
+            existing_type = str(data["existing"].get("type", "") or "").strip()
+
         def join(field: str) -> str:
             parts = []
-            for a in attrs:
+            for a in data["attrs"]:
                 v = (a.get(field, "") or "")
                 if v:
                     parts.extend(p.strip() for p in v.split(delim) if p.strip())
-            # stable dedupe
-            uniq = []
+            uniq: List[str] = []
             seen = set()
             for p in parts:
                 if p not in seen:
                     seen.add(p)
                     uniq.append(p)
             return delim.join(uniq)
+
+        final_type = _resolve_type(data["votes"], existing_type)
         merged.append({
             "name": name,
-            "type": etype,  # keep exact key's type (no "most_common" voting)
+            "type": final_type,
             "description": join("description"),
             "source_id": join("source_id"),
             "filepath": join("filepath"),
@@ -275,77 +311,68 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
 
 def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Create only the *necessary* endpoint nodes for edges, following the refined policy:
-      A) If an edge carries 'source_type'/'target_type' (typed edges), ensure those exact (name,type) nodes exist.
-      B) If no type hints:
-           - If a name has 0 typed nodes -> create (name, "unknown")
-           - If a name has >1 typed nodes -> create (name, "unknown")
-           - If exactly 1 typed node exists -> do nothing (unambiguous)
-    Returns a list of node dicts that were *created* (so caller can vectorize them).
-    """
-    # 1) Collect per-name type hints coming from relationships (if extractor provided them).
-    hinted: Dict[str, set] = {}
-    for e in edges:
-        s = e.get("source_name", "")
-        t = e.get("target_name", "")
-        st = (e.get("source_type") or "").strip()
-        tt = (e.get("target_type") or "").strip()
-        if s:
-            hinted.setdefault(s, set())
-            if st:
-                hinted[s].add(st)
-        if t:
-            hinted.setdefault(t, set())
-            if tt:
-                hinted[t].add(tt)
+    Ensure nodes exist for every endpoint referenced in the provided edges. Node identity
+    is based on name alone, and the stored type is resolved via majority voting using
+    any available edge hints combined with the current graph value.
 
-    # 2) Gather all unique endpoint names
+    Returns the list of nodes that were created or whose type was updated so vector
+    embeddings can be refreshed by the caller.
+    """
     names: List[str] = []
     seen = set()
     for e in edges:
-        for nm in (e.get("source_name", ""), e.get("target_name", "")):
-            if nm and nm not in seen:
-                seen.add(nm)
-                names.append(nm)
+        src = (e.get("source_name") or "").strip()
+        tgt = (e.get("target_name") or "").strip()
+        if src and src not in seen:
+            seen.add(src)
+            names.append(src)
+        if tgt and tgt not in seen:
+            seen.add(tgt)
+            names.append(tgt)
+
+        st = (e.get("source_type") or "").strip()
+        tt = (e.get("target_type") or "").strip()
+        if src:
+            hint_votes[src][st or "unknown"] += 1
+        if tgt:
+            hint_votes[tgt][tt or "unknown"] += 1
 
     if not names:
         return []
 
-    # 3) Bulk fetch existing nodes for those names; map name -> set(types)
-    existing = storage.get_nodes(names)
-    by_name_types: Dict[str, set] = {}
-    for row in existing:
-        nm = row["name"]
-        tp = (row.get("type") or "").strip()
-        by_name_types.setdefault(nm, set()).add(tp)
+    existing_rows = storage.get_nodes(names) or []
+    existing_by_name = {row["name"]: row for row in existing_rows if row.get("name")}
 
-    # 4) Decide which placeholders to create
-    to_add: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = []
+    affected: List[Dict[str, Any]] = []
 
-    # 4a) If typed hints exist for a name, ensure those *typed* nodes exist (prefer exact typed placeholders).
-    for nm, hinted_types in hinted.items():
-        if not hinted_types:
-            continue
-        existing_types = by_name_types.get(nm, set())
-        missing = hinted_types - existing_types
-        for tp in missing:
-            to_add.append({"name": nm, "type": tp, "description": "", "source_id": "", "filepath": ""})
-            by_name_types.setdefault(nm, set()).add(tp)  # reflect immediate creation in our view
-
-    # 4b) For names without typed hints, apply "unknown" policy only when none or many
     for nm in names:
-        if nm in hinted:  # already handled above
-            continue
-        types = by_name_types.get(nm, set())
-        if len(types) == 0 or len(types) > 1:
-            if "unknown" not in types:
-                to_add.append({"name": nm, "type": "unknown", "description": "", "source_id": "", "filepath": ""})
-                by_name_types.setdefault(nm, set()).add("unknown")
+        votes = Counter(hint_votes.get(nm, Counter()))
+        existing = existing_by_name.get(nm)
+        existing_type = str((existing or {}).get("type", "") or "").strip()
+        if existing_type:
+            votes[existing_type or "unknown"] += 1
 
-    # 5) Persist any new nodes
-    if to_add:
-        storage.upsert_nodes(to_add)
-    return to_add
+        final_type = _resolve_type(votes, existing_type)
+
+        if existing is None:
+            node = {"name": nm, "type": final_type, "description": "", "source_id": "", "filepath": ""}
+            pending.append(node)
+            affected.append(node)
+        elif final_type != existing_type:
+            pending.append({"name": nm, "type": final_type})
+            affected.append({
+                "name": nm,
+                "type": final_type,
+                "description": (existing.get("description") or ""),
+                "source_id": (existing.get("source_id") or ""),
+                "filepath": (existing.get("filepath") or ""),
+            })
+
+    if pending:
+        storage.upsert_nodes(pending)
+
+    return affected
 
 
 def ingest_paths(paths: List[Path]):

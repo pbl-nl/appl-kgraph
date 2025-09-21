@@ -8,6 +8,7 @@ import pytest
 import traceback
 
 # Direct imports only, per instruction
+pytest.importorskip("chromadb", reason="chromadb is required for storage vector tests")
 from graph.storage import Storage, StoragePaths
 import test.examples as examples
 

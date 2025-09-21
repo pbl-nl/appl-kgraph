@@ -8,7 +8,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from openai import OpenAI, AzureOpenAI
-import chromadb
+
+try:  # pragma: no cover - import guard for optional dependency
+    import chromadb  # type: ignore
+except ImportError as _chromadb_exc:  # pragma: no cover - executed when dependency missing
+    chromadb = None  # type: ignore[assignment]
+    _CHROMADB_IMPORT_ERROR: Optional[ImportError] = _chromadb_exc
+else:
+    _CHROMADB_IMPORT_ERROR = None
 from settings import settings
 
 
@@ -734,7 +741,11 @@ class GraphDB:
 class _ChromaBase:
     def __init__(self, collection: str, chroma_dir: str, embedder: Optional[Embedder] = None):
         if chromadb is None:
-            raise RuntimeError("chromadb not installed. pip install chromadb")
+            if _CHROMADB_IMPORT_ERROR is not None:
+                raise RuntimeError(
+                    "chromadb is required for vector storage. Install it with `pip install chromadb`."
+                ) from _CHROMADB_IMPORT_ERROR
+            raise RuntimeError("chromadb is required for vector storage. Install it with `pip install chromadb`.")
 
         _ensure_dir_for(os.path.join(chroma_dir, ".sentinel"))
         self._chroma_dir = chroma_dir   # keep for error message

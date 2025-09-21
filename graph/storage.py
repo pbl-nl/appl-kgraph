@@ -5,10 +5,9 @@ import sqlite3
 import json, hashlib
 from typing import Dict, Any, Iterable, List, Optional, Sequence, Tuple
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import replace
 from dotenv import load_dotenv
 from openai import OpenAI, AzureOpenAI
-
 try:  # pragma: no cover - import guard for optional dependency
     import chromadb  # type: ignore
 except ImportError as _chromadb_exc:  # pragma: no cover - executed when dependency missing
@@ -16,9 +15,7 @@ except ImportError as _chromadb_exc:  # pragma: no cover - executed when depende
     _CHROMADB_IMPORT_ERROR: Optional[ImportError] = _chromadb_exc
 else:
     _CHROMADB_IMPORT_ERROR = None
-from settings import settings
-
-
+from settings import settings, StoragePaths as SettingsStoragePaths
 
 # ---------------------------
 # Helpers
@@ -475,7 +472,7 @@ class ChunksDB:
 class GraphDB:
     """
     Separate SQLite database for the knowledge graph schema (nodes & edges).
-    - Nodes unique on (name, type)
+    - Nodes unique on name
     - Edges unique on undirected pair (source_name, target_name), stored canonically as (u_source_name, u_target_name)
     """
     def __init__(self, db_path: str = "graph.sqlite"):
@@ -503,7 +500,7 @@ class GraphDB:
                 description TEXT,
                 source_id TEXT,
                 filepath TEXT,
-                UNIQUE(name, type)
+                UNIQUE(name)
             );''')
 
             # Store canonicalized pair to enforce undirected uniqueness
@@ -543,10 +540,9 @@ class GraphDB:
             ''', [(n['name'], n['type'], n.get('description'), n.get('source_id'), n.get('filepath')) for n in nodes])
             con.commit()
 
-    # ! Deprecated: use get_nodes() instead
-    def get_node(self, name: str, type_: str) -> Optional[Dict[str, Any]]:
+    def get_node(self, name: str) -> Optional[Dict[str, Any]]:
         """
-        Fetch exactly one node by its composite identity (name, type).
+        Fetch exactly one node by name.
         Returns a dict with: name, type, description, source_id, filepath — or None if missing.
         """
         keys = [k for k in self.KEYS_NODE if k != "id"]
@@ -555,8 +551,8 @@ class GraphDB:
             cur.execute('''
                 SELECT name, type, description, source_id, filepath
                 FROM nodes
-                WHERE name = ? AND type = ?;
-            ''', (name, type_))
+                WHERE name = ?;
+            ''', (name,))
             row = cur.fetchone()
         return dict(zip(keys, row)) if row else None
 
@@ -576,30 +572,30 @@ class GraphDB:
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
 
-    def delete_node(self, name: str, type_: str) -> None:
+    def delete_node(self, name: str) -> None:
         """
-        Delete exactly one node identified by (name, type).
+        Delete exactly one node identified by name.
         """
         with self.connect() as con:
-            con.execute('DELETE FROM nodes WHERE name = ? AND type = ?;', (name, type_))
+            con.execute('DELETE FROM nodes WHERE name = ?;', (name,))
             con.commit()
 
 
-    def delete_nodes(self, pairs: List[Tuple[str, str]]) -> None:
+    def delete_nodes(self, names: List[str]) -> None:
         """
-        Bulk delete by (name, type) pairs.
+        Bulk delete by name.
         """
-        if not pairs:
+        if not names:
             return
         with self.connect() as con:
-            con.executemany('DELETE FROM nodes WHERE name = ? AND type = ?;', pairs)
+            con.executemany('DELETE FROM nodes WHERE name = ?;', [(n,) for n in names])
             con.commit()
 
 
     def update_node(self, name: str, updates: Dict[str, Any]) -> None:
         if not updates:
             return
-        allowed_keys = {"description", "source_id", "filepath"}
+        allowed_keys = {"type", "description", "source_id", "filepath"}
         set_clauses = []
         values = []
         for k, v in updates.items():
@@ -608,11 +604,10 @@ class GraphDB:
                 values.append(v)
         if not set_clauses:
             return
-        etype = updates.get("type", "")
-        values.extend([name, etype])
+        values.append(name)
         set_clause = ", ".join(set_clauses)
         with self.connect() as con:
-            con.execute(f"UPDATE nodes SET {set_clause} WHERE name = ? AND type = ?;", values)
+            con.execute(f"UPDATE nodes SET {set_clause} WHERE name = ?;", values)
             con.commit()
 
     def update_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
@@ -748,7 +743,6 @@ class _ChromaBase:
             raise RuntimeError("chromadb is required for vector storage. Install it with `pip install chromadb`.")
 
         _ensure_dir_for(os.path.join(chroma_dir, ".sentinel"))
-        self._chroma_dir = chroma_dir   # keep for error message
         self.client = chromadb.PersistentClient(path=chroma_dir)  # type: ignore
         self.col = self.client.get_or_create_collection(
             name=collection,
@@ -823,25 +817,62 @@ class _ChromaBase:
             )
 
     def _add(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]):
+        metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]
+        if self._use_fallback:
+            for id_, text, meta in zip(ids, texts, metadatas):
+                self._memory[id_] = {"document": text, "metadata": meta}
+            return
         embeddings = self.embedder.embed_texts(texts)
-        metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]  # Chroma does not allow None values in metadata
         self.col.add(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def _get(self, ids: List[str]) -> List[Dict[str, Any]]:
+        if self._use_fallback:
+            out: List[Dict[str, Any]] = []
+            for id_ in ids:
+                entry = self._memory.get(id_)
+                if entry is None:
+                    continue
+                out.append({
+                    "ids": [id_],
+                    "documents": [entry.get("document", "")],
+                    "metadatas": [entry.get("metadata", {})],
+                })
+            return out
         res = self.col.get(ids=ids, include=["documents", "metadatas"])
         return self.to_list(res)
 
     def _delete(self, ids: List[str]) -> None:
+        if self._use_fallback:
+            for id_ in ids:
+                self._memory.pop(id_, None)
+            return
         self.col.delete(ids=ids)
 
     def _upsert(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]) -> None:
+        metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]
+        if self._use_fallback:
+            for id_, text, meta in zip(ids, texts, metadatas):
+                self._memory[id_] = {"document": text, "metadata": meta}
+            return
         embeddings = self.embedder.embed_texts(texts)
         self.col.upsert(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def _query(self, texts: List[str], n_results: int, where: Optional[Dict[str, Any]] = None,
                where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        if self._use_fallback:
+            out: List[Dict[str, Any]] = []
+            for idx, (id_, entry) in enumerate(self._memory.items()):
+                if idx >= n_results:
+                    break
+                out.append({
+                    "ids": [id_],
+                    "documents": [entry.get("document", "")],
+                    "metadatas": [entry.get("metadata", {})],
+                    "distances": [0.0],
+                })
+            return out
         embeddings = self.embedder.embed_texts(texts)
-        res = self.col.query(embeddings=embeddings, n_results=n_results, where=where, 
+        res = self.col.query(embeddings=embeddings, n_results=n_results, where=where,
                              where_document=where_document, include=["documents", "metadatas", "distances"])
         return self.to_list(res)
 
@@ -902,10 +933,20 @@ class ChunkVectors(_ChromaBase):
 class EntityVectors(_ChromaBase):
     """
     Vector DB for entities.
-    Uniqueness: (name, type) -> id "name::type"
+    Uniqueness: name -> id "name"
     metadatas:
       - name, type, description, source_id, filepath
     """
+
+    @staticmethod
+    def _embed_text(name: str, etype: str, description: str) -> str:
+        type_part = f"[{etype}]" if etype else ""
+        parts = [name]
+        if type_part:
+            parts.append(type_part)
+        if description:
+            parts.append(description)
+        return " ".join(parts).strip()
 
     def add_entities(self, entities: Sequence[Dict[str, Any]]) -> None:
         ids: List[str] = []
@@ -913,11 +954,10 @@ class EntityVectors(_ChromaBase):
         metas: List[Dict[str, Any]] = []
         for e in entities:
             name = e["name"]
-            etype = e["type"]
+            etype = e.get("type", "") or ""
             desc = e.get("description", "") or ""
-            ids.append(f"{name}::{etype}")
-            # Embed name + type + description
-            texts.append(f"{name} [{etype}] {desc}")
+            ids.append(name)
+            texts.append(self._embed_text(name, etype, desc))
             metas.append({
                 "name": name,
                 "type": etype,
@@ -939,11 +979,10 @@ class EntityVectors(_ChromaBase):
         metas: List[Dict[str, Any]] = []
         for e in entities:
             name = e["name"]
-            etype = e["type"]
+            etype = e.get("type", "") or ""
             desc = e.get("description", "") or ""
-            ids.append(f"{name}::{etype}")
-            # Embed name + type + description
-            texts.append(f"{name} [{etype}] {desc}")
+            ids.append(name)
+            texts.append(self._embed_text(name, etype, desc))
             metas.append({
                 "name": name,
                 "type": etype,
@@ -1031,14 +1070,8 @@ class RelationVectors(_ChromaBase):
 # Unified Storage Facade
 # ---------------------------
 
-@dataclass
-class StoragePaths:
-    documents_db: str = settings.storage.documents_db
-    chunks_db: str = settings.storage.chunks_db
-    graph_db: str = settings.storage.graph_db
-    chroma_chunks: str = settings.storage.chroma_chunks
-    chroma_entities: str = settings.storage.chroma_entities
-    chroma_relations: str = settings.storage.chroma_relations
+# Re-export the unified StoragePaths dataclass from graph.settings for compatibility.
+StoragePaths = SettingsStoragePaths
 
 
 class Storage:
@@ -1055,7 +1088,8 @@ class Storage:
     """
 
     def __init__(self, paths: Optional[StoragePaths] = None, embedder: Optional[Embedder] = None):
-        paths = paths or StoragePaths()
+        if paths is None:
+            paths = replace(settings.storage)
 
         # Schema DBs
         self.documents = DocumentsDB(paths.documents_db)
@@ -1108,7 +1142,7 @@ class Storage:
     def add_entity_vectors(self, entities: Sequence[Dict[str, Any]]) -> None:
         """
         Each entity dict must include: name, type; optional: description, source_id, filepath
-        Uniqueness enforced via Chroma IDs "name::type".
+        Uniqueness enforced via entity name.
         """
         if entities:
             self.entity_vectors.add_entities(entities)
@@ -1149,11 +1183,11 @@ class Storage:
         return self.chunks.get_chunks_by_uuids(chunk_uuids)
     
     # 3) Graph
-    def get_node(self, name: str, type_: str) -> Optional[Dict[str, Any]]:
+    def get_node(self, name: str) -> Optional[Dict[str, Any]]:
         """
-        Pass-through: fetch one graph node by (name, type).
+        Pass-through: fetch one graph node by name.
         """
-        return self.graph.get_node(name, type_)
+        return self.graph.get_node(name)
 
     def get_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
         return self.graph.get_nodes(names)
@@ -1169,17 +1203,14 @@ class Storage:
         return self.chunk_vectors.get([chunk_uuid])
 
     # 5) Entity Vectors
-    def get_entities(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+    def get_entities(self, names: List[str]) -> List[Dict[str, Any]]:
         """
-        Retrieve entity vectors by (name, type) pairs.
-        Converts pairs to composite IDs 'name::type' and fetches from Chroma.
+        Retrieve entity vectors by name.
         Returns a list of results (each with 'ids', 'documents', 'metadatas', 'distances' if available).
         """
-        if not pairs:
+        if not names:
             return []
-        ids = [f"{n}::{t}" for n, t in pairs]
-        # EntityVectors.get_entities expects a list of IDs (param name is 'names' in the class).
-        return self.entity_vectors.get_entities(ids)
+        return self.entity_vectors.get_entities(names)
 
 
     # 6) Relation Vectors
@@ -1203,17 +1234,17 @@ class Storage:
         self.chunks.delete_chunks_by_uuids(chunk_uuids)
 
     # 3) Graph
-    def delete_node(self, name: str, type_: str) -> None:
+    def delete_node(self, name: str) -> None:
         """
-        Pass-through: delete one graph node by (name, type).
+        Pass-through: delete one graph node by name.
         """
-        self.graph.delete_node(name, type_)
+        self.graph.delete_node(name)
 
-    def delete_nodes(self, pairs: List[Tuple[str, str]]) -> None:
+    def delete_nodes(self, names: List[str]) -> None:
         """
-        Pass-through: bulk delete graph nodes by (name, type).
+        Pass-through: bulk delete graph nodes by name.
         """
-        self.graph.delete_nodes(pairs)
+        self.graph.delete_nodes(names)
 
     def delete_edge(self, source_name: str, target_name: str) -> None:
         self.graph.delete_edge(source_name, target_name)
@@ -1226,14 +1257,13 @@ class Storage:
         self.chunk_vectors.delete([chunk_uuid])
 
     # 5) Entity Vectors
-    def delete_entity_vector(self, pairs: List[Tuple[str, str]]) -> None:
+    def delete_entity_vector(self, names: List[str]) -> None:
         """
-        Delete entity vectors by (name, type) pairs.
+        Delete entity vectors by name.
         """
-        if not pairs:
+        if not names:
             return
-        ids = [f"{n}::{t}" for n, t in pairs]
-        self.entity_vectors.delete_entities(ids)
+        self.entity_vectors.delete_entities(names)
 
     # 6) Relation Vectors
     def delete_relation_vector(self, pairs: List[Tuple[str, str]]) -> None:
@@ -1255,22 +1285,30 @@ class Storage:
 
     def upsert_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
         """
-        Split incoming rows into adds vs updates based on existing (name, type) pairs.
+        Split incoming rows into adds vs updates based on existing node names.
         """
         to_add: List[Dict[str, Any]] = []
         to_update: List[Dict[str, Any]] = []
         if not updates_list:
             return
-        # Bulk fetch all names once, then test exact (name, type) membership
+        # Bulk fetch all names once, then test membership
         names = sorted({u["name"] for u in updates_list})
         existing = self.graph.get_nodes(names) if names else []
-        existing_pairs = {(row["name"], row["type"]) for row in existing}
+        existing_names = {row["name"] for row in existing}
         for upd in updates_list:
-            key = (upd["name"], upd["type"])
-            if key in existing_pairs:
+            name = upd.get("name")
+            if not name:
+                continue
+            if name in existing_names:
                 to_update.append(upd)
             else:
-                to_add.append(upd)
+                to_add.append({
+                    "name": name,
+                    "type": (upd.get("type") or "unknown"),
+                    "description": (upd.get("description") or ""),
+                    "source_id": (upd.get("source_id") or ""),
+                    "filepath": (upd.get("filepath") or ""),
+                })
         if to_add:
             self.graph.add_nodes(to_add)
         if to_update:

@@ -31,7 +31,8 @@ For each pair of related entities, extract the following information:
 - relationship_description: explanation as to why you think the source entity and the target entity are related to each other
 - relationship_strength: a numeric score indicating strength of the relationship between the source entity and target entity
 - relationship_keywords: one or more high-level key words that summarize the overarching nature of the relationship, focusing on concepts or themes rather than specific details
-Format each relationship as ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_keywords>{tuple_delimiter}<relationship_strength>)
+Format each relationship as ("relationship"{tuple_delimiter}<source_entity_name>{tuple_delimiter}<source_entity_type>{tuple_delimiter}<target_entity_name>{tuple_delimiter}<target_entity_type>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_keywords>{tuple_delimiter}<relationship_strength>)
+
 
 3. Identify high-level key words that summarize the main concepts, themes, or topics of the entire text. These should capture the overarching ideas present in the document.
 Format the content-level key words as ("content_keywords"{tuple_delimiter}<high_level_keywords>)
@@ -329,6 +330,17 @@ When handling content with timestamps:
 - Addtional user prompt: {user_prompt}
 
 Response:"""
+
+PROMPTS["summarize_text"] = """---Role---
+You are a helpful assistant responsible for generating a concise summary of the data provided below.
+Given a text document, please provide a concise summary that captures the main points and key information.
+Use {language} as output language.
+
+#######
+---Data---
+{text}
+#######
+Output:"""
 
 if __name__ == "__main__":
     import argparse

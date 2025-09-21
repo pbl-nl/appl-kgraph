@@ -283,8 +283,6 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
            - If exactly 1 typed node exists -> do nothing (unambiguous)
     Returns a list of node dicts that were *created* (so caller can vectorize them).
     """
-    delim = settings.ingestion.delimiter
-
     # 1) Collect per-name type hints coming from relationships (if extractor provided them).
     hinted: Dict[str, set] = {}
     for e in edges:

@@ -12,15 +12,9 @@ from extractor import extract_from_chunks
 from llm import llm_summarize_text
 from settings import settings
 import os
-from dataclasses import dataclass
 import hashlib
 
 # Helpers -------------------------------------------
-
-@dataclass(frozen=True)
-class FileStats:
-    size: int
-    mtime: float
 
 def normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     # Lower-case keys, unify language key

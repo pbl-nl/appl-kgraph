@@ -318,9 +318,6 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
     Returns the list of nodes that were created or whose type was updated so vector
     embeddings can be refreshed by the caller.
     """
-
-    # Collect all votes coming from typed edge hints.
-    hint_votes: Dict[str, Counter] = defaultdict(Counter)
     names: List[str] = []
     seen = set()
     for e in edges:

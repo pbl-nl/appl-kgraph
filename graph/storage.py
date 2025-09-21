@@ -5,7 +5,7 @@ import sqlite3
 import json, hashlib
 from typing import Dict, Any, Iterable, List, Optional, Sequence, Tuple
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import replace
 from dotenv import load_dotenv
 from openai import OpenAI, AzureOpenAI
 try:
@@ -16,8 +16,7 @@ try:
     from settings import settings  # type: ignore
 except ImportError:  # pragma: no cover - allow package-relative import
     from .settings import settings  # type: ignore
-
-
+from settings import settings, StoragePaths as SettingsStoragePaths
 
 # ---------------------------
 # Helpers
@@ -1075,14 +1074,8 @@ class RelationVectors(_ChromaBase):
 # Unified Storage Facade
 # ---------------------------
 
-@dataclass
-class StoragePaths:
-    documents_db: str = settings.storage.documents_db
-    chunks_db: str = settings.storage.chunks_db
-    graph_db: str = settings.storage.graph_db
-    chroma_chunks: str = settings.storage.chroma_chunks
-    chroma_entities: str = settings.storage.chroma_entities
-    chroma_relations: str = settings.storage.chroma_relations
+# Re-export the unified StoragePaths dataclass from graph.settings for compatibility.
+StoragePaths = SettingsStoragePaths
 
 
 class Storage:
@@ -1099,7 +1092,8 @@ class Storage:
     """
 
     def __init__(self, paths: Optional[StoragePaths] = None, embedder: Optional[Embedder] = None):
-        paths = paths or StoragePaths()
+        if paths is None:
+            paths = replace(settings.storage)
 
         # Schema DBs
         self.documents = DocumentsDB(paths.documents_db)

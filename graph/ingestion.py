@@ -305,68 +305,59 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
 
 def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Ensure nodes exist for every endpoint referenced in the provided edges. Node identity
-    is based on name alone, and the stored type is resolved via majority voting using
-    any available edge hints combined with the current graph value.
+    Ensure that nodes exist for every endpoint referenced in the provided edges.
 
-    Returns the list of nodes that were created or whose type was updated so vector
-    embeddings can be refreshed by the caller.
+    - Node identity is based on the node name only (string equality).
+    - Since we no longer extract or propagate `source_type` / `target_type` from edges,
+      this function does not update node types.
+    - Newly created nodes are given type "unknown" and empty metadata fields.
+    - Existing nodes are left unchanged.
+
+    Returns
+    -------
+    affected : List[Dict[str, Any]]
+        A list of nodes that were newly created (so that vector embeddings can be
+        generated later). If no new nodes were needed, the list is empty.
     """
-    names: List[str] = []
-    seen = set()
-    for e in edges:
-        src = (e.get("source_name") or "").strip()
-        tgt = (e.get("target_name") or "").strip()
-        if src and src not in seen:
-            seen.add(src)
-            names.append(src)
-        if tgt and tgt not in seen:
-            seen.add(tgt)
-            names.append(tgt)
-
-        st = (e.get("source_type") or "").strip()
-        tt = (e.get("target_type") or "").strip()
-        if src:
-            hint_votes[src][st or "unknown"] += 1
-        if tgt:
-            hint_votes[tgt][tt or "unknown"] += 1
+    # Collect all unique node names from edges (source + target)
+    names = {
+        (e.get("source_name") or "").strip()
+        for e in edges
+    } | {
+        (e.get("target_name") or "").strip()
+        for e in edges
+    }
+    names.discard("")  # drop empty names
 
     if not names:
         return []
 
-    existing_rows = storage.get_nodes(names) or []
+    # Fetch any existing nodes in bulk
+    existing_rows = storage.get_nodes(list(names)) or []
     existing_by_name = {row["name"]: row for row in existing_rows if row.get("name")}
 
-    pending: List[Dict[str, Any]] = []
-    affected: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = []   # nodes to insert into storage
+    affected: List[Dict[str, Any]] = []  # nodes we created (return to caller)
 
     for nm in names:
-        votes = Counter(hint_votes.get(nm, Counter()))
-        existing = existing_by_name.get(nm)
-        existing_type = str((existing or {}).get("type", "") or "").strip()
-        if existing_type:
-            votes[existing_type or "unknown"] += 1
-
-        final_type = _resolve_type(votes, existing_type)
-
-        if existing is None:
-            node = {"name": nm, "type": final_type, "description": "", "source_id": "", "filepath": ""}
+        if nm not in existing_by_name:
+            # Create a new placeholder node
+            node = {
+                "name": nm,
+                "type": "unknown",
+                "description": "",
+                "source_id": "",
+                "filepath": "",
+            }
             pending.append(node)
             affected.append(node)
-        elif final_type != existing_type:
-            pending.append({"name": nm, "type": final_type})
-            affected.append({
-                "name": nm,
-                "type": final_type,
-                "description": (existing.get("description") or ""),
-                "source_id": (existing.get("source_id") or ""),
-                "filepath": (existing.get("filepath") or ""),
-            })
 
+    # Bulk insert missing nodes
     if pending:
         storage.upsert_nodes(pending)
 
     return affected
+
 
 
 def ingest_paths(paths: List[Path]):

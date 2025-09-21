@@ -4,7 +4,7 @@ import uuid
 import fitz
 import mimetypes
 from pathlib import Path
-from docx2pdf import convert
+#from docx2pdf import convert
 from typing import List, Tuple, Dict, Any, Union
 from langchain_community.document_loaders import BSHTMLLoader
 from langchain_community.document_loaders import TextLoader

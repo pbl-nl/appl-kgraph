@@ -33,7 +33,7 @@ def build_entity_relation_prompt(
     examples so they DO NOT contain '{record_delimiter}' literals.
     """
     # 1) Base context for the prompt (without examples yet)
-    examples = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
+    examples_template = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
     ctx = dict(
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         record_delimiter=PROMPTS["DEFAULT_RECORD_DELIMITER"],
@@ -45,7 +45,6 @@ def build_entity_relation_prompt(
     )
 
     # 2) Join & format the examples with the SAME ctx so placeholders are replaced
-    examples_template = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
     examples = examples_template.format(**ctx)  # fill in delimiters, entity_types, language
     ctx["examples"] = examples
 

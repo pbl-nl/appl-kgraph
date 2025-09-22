@@ -32,6 +32,62 @@ except ImportError as exc:  # pragma: no cover - surface a useful error message
 
 LOGGER = logging.getLogger("PathRAG")
 
+# ---------------------------------------------------------------------------
+# Verbosity helper
+# ---------------------------------------------------------------------------
+
+def render_full_context(result: RetrievalResult) -> str:
+    lines = []
+
+    # 1) Entities
+    lines.append("\n== ENTITY MATCHES ==")
+    if result.entity_matches:
+        for i, m in enumerate(result.entity_matches, 1):
+            lines.append(
+                f"{i}. {m.name} [{m.type or 'unknown'}] "
+                f"(score={m.score:.3f})\n   {m.description or '(no description)'}"
+            )
+    else:
+        lines.append("(none)")
+
+    # 2) Relations
+    lines.append("\n== RELATION MATCHES ==")
+    if result.relation_matches:
+        for i, r in enumerate(result.relation_matches, 1):
+            kw = f" | keywords: {r.keywords}" if r.keywords else ""
+            lines.append(
+                f"{i}. {r.source_name} ↔ {r.target_name} (score={r.score:.3f})"
+                f"\n   {r.description or '(no description)'}{kw}"
+            )
+    else:
+        lines.append("(none)")
+
+    # 3) Chunks
+    lines.append("\n== CHUNK MATCHES ==")
+    if result.chunk_matches:
+        for i, c in enumerate(result.chunk_matches, 1):
+            head = f"{c.filename or c.document_id or '(unknown doc)'}"
+            lines.append(
+                f"{i}. {head} (score={c.score:.3f})"
+                f"\n   chunk_uuid={c.chunk_uuid} doc_id={c.document_id}"
+            )
+            # If you want full chunk text printed, uncomment below:
+            # lines.append("   --- chunk text ---")
+            # lines.append(c.text)
+    else:
+        lines.append("(none)")
+
+    # 4) Context windows (graph + chunks)
+    lines.append("\n== CONTEXT WINDOWS ==")
+    if result.context_windows:
+        for w in result.context_windows:
+            lines.append(f"[{w.label}] score={w.score:.3f}")
+            lines.append(w.text)
+            lines.append("")  # blank line
+    else:
+        lines.append("(none)")
+
+    return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
 # Logging and token helpers
@@ -262,51 +318,58 @@ class StorageAdapter:
         return [value]
 
     def query_entities(self, text: str, limit: int = 5) -> List[EntityMatch]:
+        """Query entity vector index and return EntityMatch objects."""
         results = self._storage.entity_vectors.query(text=text, n_results=limit) or []
         matches: List[EntityMatch] = []
-        for result in results:
-            metadatas = self._as_list(result.get("metadatas"))
-            ids = self._as_list(result.get("ids"))
-            distances = self._as_list(result.get("distances"))
-            max_len = max((len(seq) for seq in (metadatas, ids, distances) if seq), default=0)
-            for index in range(max_len):
-                metadata = metadatas[index] if index < len(metadatas) else {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                entity_id = ids[index] if index < len(ids) else ""
-                distance = distances[index] if index < len(distances) else None
-                matches.append(
-                    EntityMatch(
-                        name=metadata.get("name", entity_id),
-                        type=metadata.get("type"),
-                        description=metadata.get("description", ""),
-                        score=_distance_to_similarity(distance),
-                    )
+        if not results:
+            return matches
+
+        # Chroma returns a single dict with lists
+        ids = results[0].get("ids", [])
+        metadatas = results[0].get("metadatas", [])
+        distances = results[0].get("distances", [])
+
+        for i, metadata in enumerate(metadatas):
+            if not isinstance(metadata, dict):
+                continue
+            entity_id = ids[i] if i < len(ids) else ""
+            distance = distances[i] if i < len(distances) else None
+            matches.append(
+                EntityMatch(
+                    name=metadata.get("name", entity_id),
+                    type=metadata.get("type"),
+                    description=metadata.get("description", ""),
+                    score=_distance_to_similarity(distance),
                 )
+            )
         return matches
 
     def query_relations(self, text: str, limit: int = 5) -> List[RelationMatch]:
+        """Query relation vector index and return RelationMatch objects."""
         results = self._storage.relation_vectors.query(text=text, n_results=limit) or []
         matches: List[RelationMatch] = []
-        for result in results:
-            metadatas = self._as_list(result.get("metadatas"))
-            distances = self._as_list(result.get("distances"))
-            max_len = max((len(seq) for seq in (metadatas, distances) if seq), default=0)
-            for index in range(max_len):
-                metadata = metadatas[index] if index < len(metadatas) else {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                distance = distances[index] if index < len(distances) else None
-                matches.append(
-                    RelationMatch(
-                        source_name=metadata.get("source_name", ""),
-                        target_name=metadata.get("target_name", ""),
-                        description=metadata.get("description", ""),
-                        keywords=metadata.get("keywords", ""),
-                        score=_distance_to_similarity(distance),
-                    )
+        if not results:
+            return matches
+
+        ids = results[0].get("ids", [])
+        metadatas = results[0].get("metadatas", [])
+        distances = results[0].get("distances", [])
+
+        for i, metadata in enumerate(metadatas):
+            if not isinstance(metadata, dict):
+                continue
+            distance = distances[i] if i < len(distances) else None
+            matches.append(
+                RelationMatch(
+                    source_name=metadata.get("source_name", ""),
+                    target_name=metadata.get("target_name", ""),
+                    description=metadata.get("description", ""),
+                    keywords=metadata.get("keywords", ""),
+                    score=_distance_to_similarity(distance),
                 )
+            )
         return matches
+
 
     def query_chunks(self, text: str, limit: int = 5) -> List[ChunkMatch]:
         results = self._storage.chunk_vectors.query(text=text, n_results=limit) or []
@@ -479,7 +542,7 @@ def build_chunk_windows(
     windows: List[ContextWindow] = []
     for chunk in chunks[:max_windows]:
         snippet = truncate_by_tokens(chunk.text, max_tokens, model)
-        label = f"chunk::{chunk.filename or chunk.document_id}" if chunk.filename else "chunk"
+        label = f"chunk::{chunk.filename or chunk.document_id}"
         windows.append(ContextWindow(label=label, text=snippet, score=chunk.score))
     return windows
 

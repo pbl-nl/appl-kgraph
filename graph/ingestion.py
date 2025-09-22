@@ -464,12 +464,7 @@ def ingest_paths(paths: List[Path]):
         entities_in = res.get("entities", []) or []
         edges_in = res.get("relationships", []) or []
 
-        #  Ensure edge endpoints exist with refined "unknown" policy
-        #    - If relationships carry source_type/target_type, ensure those exact (name,type) exist
-        #    - Else:
-        #        • 0 typed nodes for a name  -> create (name,"unknown")
-        #        • >1 typed nodes for a name -> create (name,"unknown")
-        #        • exactly 1 typed node      -> do nothing
+        # Ensure all edge endpoints exist as nodes, create placeholders if needed
         placeholders = ensure_edge_endpoints(storage, edges_in)
         if placeholders:
             all_entities.extend(placeholders)           # collect for vector DB later
@@ -485,10 +480,12 @@ def ingest_paths(paths: List[Path]):
             storage.upsert_edges(edges)                 # write schema
             all_relations.extend(edges)                 # collect for vector DB later
 
-    # Finally, add all chunks, entities, and relations to vector DB
+    # Finally, add all chunks, entities, and relations to vector DB   
     if all_chunks:
         storage.upsert_chunk_vector(all_chunks)
         deduped_entities = dedupe_entities_for_vectors(all_entities)
+        if all_chunks:
+            print(f"[ingestion] sample chunk: {all_chunks[0]}")
         if deduped_entities:
             storage.upsert_entity_vector(deduped_entities)
         if all_relations:
@@ -506,3 +503,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

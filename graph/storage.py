@@ -836,7 +836,7 @@ class _ChromaBase:
     def _query(self, texts: List[str], n_results: int, where: Optional[Dict[str, Any]] = None,
                where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         embeddings = self.embedder.embed_texts(texts)
-        res = self.col.query(embeddings=embeddings, n_results=n_results, where=where,
+        res = self.col.query(query_embeddings=embeddings, n_results=n_results, where=where,
                              where_document=where_document, include=["documents", "metadatas", "distances"])
         return self.to_list(res)
 

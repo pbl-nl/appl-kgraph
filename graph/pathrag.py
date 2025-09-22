@@ -251,51 +251,97 @@ class StorageAdapter:
     # ------------------------------------------------------------------
     # Vector queries
     # ------------------------------------------------------------------
+    @staticmethod
+    def _as_list(value: Any) -> List[Any]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return list(value)
+        return [value]
+
     def query_entities(self, text: str, limit: int = 5) -> List[EntityMatch]:
         results = self._storage.entity_vectors.query(text=text, n_results=limit) or []
         matches: List[EntityMatch] = []
         for result in results:
-            metadata = result.get("metadatas") or {}
-            matches.append(
-                EntityMatch(
-                    name=metadata.get("name", result.get("ids", "")),
-                    type=metadata.get("type"),
-                    description=metadata.get("description", ""),
-                    score=_distance_to_similarity(result.get("distances")),
+            metadatas = self._as_list(result.get("metadatas"))
+            ids = self._as_list(result.get("ids"))
+            distances = self._as_list(result.get("distances"))
+            max_len = max((len(seq) for seq in (metadatas, ids, distances) if seq), default=0)
+            for index in range(max_len):
+                metadata = metadatas[index] if index < len(metadatas) else {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                entity_id = ids[index] if index < len(ids) else ""
+                distance = distances[index] if index < len(distances) else None
+                matches.append(
+                    EntityMatch(
+                        name=metadata.get("name", entity_id),
+                        type=metadata.get("type"),
+                        description=metadata.get("description", ""),
+                        score=_distance_to_similarity(distance),
+                    )
                 )
-            )
         return matches
 
     def query_relations(self, text: str, limit: int = 5) -> List[RelationMatch]:
         results = self._storage.relation_vectors.query(text=text, n_results=limit) or []
         matches: List[RelationMatch] = []
         for result in results:
-            metadata = result.get("metadatas") or {}
-            matches.append(
-                RelationMatch(
-                    source_name=metadata.get("source_name", ""),
-                    target_name=metadata.get("target_name", ""),
-                    description=metadata.get("description", ""),
-                    keywords=metadata.get("keywords", ""),
-                    score=_distance_to_similarity(result.get("distances")),
+            metadatas = self._as_list(result.get("metadatas"))
+            distances = self._as_list(result.get("distances"))
+            max_len = max((len(seq) for seq in (metadatas, distances) if seq), default=0)
+            for index in range(max_len):
+                metadata = metadatas[index] if index < len(metadatas) else {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                distance = distances[index] if index < len(distances) else None
+                matches.append(
+                    RelationMatch(
+                        source_name=metadata.get("source_name", ""),
+                        target_name=metadata.get("target_name", ""),
+                        description=metadata.get("description", ""),
+                        keywords=metadata.get("keywords", ""),
+                        score=_distance_to_similarity(distance),
+                    )
                 )
-            )
         return matches
 
     def query_chunks(self, text: str, limit: int = 5) -> List[ChunkMatch]:
         results = self._storage.chunk_vectors.query(text=text, n_results=limit) or []
         matches: List[ChunkMatch] = []
         for result in results:
-            metadata = result.get("metadatas") or {}
-            matches.append(
-                ChunkMatch(
-                    chunk_uuid=result.get("ids", ""),
-                    document_id=str(metadata.get("doc_id", "")),
-                    filename=str(metadata.get("filename", "")),
-                    text=result.get("documents", ""),
-                    score=_distance_to_similarity(result.get("distances")),
-                )
+            metadatas = self._as_list(result.get("metadatas"))
+            ids = self._as_list(result.get("ids"))
+            distances = self._as_list(result.get("distances"))
+            documents = self._as_list(result.get("documents"))
+            max_len = max(
+                (
+                    len(seq)
+                    for seq in (metadatas, ids, distances, documents)
+                    if seq
+                ),
+                default=0,
             )
+            for index in range(max_len):
+                metadata = metadatas[index] if index < len(metadatas) else {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                chunk_id = ids[index] if index < len(ids) else ""
+                distance = distances[index] if index < len(distances) else None
+                document = documents[index] if index < len(documents) else ""
+                if not isinstance(document, str):
+                    document = str(document or "")
+                matches.append(
+                    ChunkMatch(
+                        chunk_uuid=str(chunk_id),
+                        document_id=str(metadata.get("doc_id", "")),
+                        filename=str(metadata.get("filename", "")),
+                        text=document,
+                        score=_distance_to_similarity(distance),
+                    )
+                )
         return matches
 
     # ------------------------------------------------------------------
@@ -353,6 +399,13 @@ class StorageAdapter:
 
 
 def _distance_to_similarity(value: Any) -> float:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for item in value:
+            try:
+                return max(0.0, 1.0 - float(item))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
     try:
         return max(0.0, 1.0 - float(value))
     except (TypeError, ValueError):  # pragma: no cover - defensive

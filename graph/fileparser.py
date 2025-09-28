@@ -18,7 +18,7 @@ class FileParser:
     """
     
     SUPPORTED_EXTENSIONS = {'.html', '.docx', '.md', '.pdf', '.txt'}
-    SUPPORTED_EXTENSIONS = SUPPORTED_EXTENSIONS - {'.docx'} ## THIS IS REMOVED DUE TO MACOS ERROR
+    SUPPORTED_EXTENSIONS = SUPPORTED_EXTENSIONS - {'.docx'} ## THIS IS TEMPORARILY REMOVED DUE TO MACOS ERROR
 
     def __init__(self, root: Path = None):
         if root is not None:

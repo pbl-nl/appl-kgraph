@@ -26,7 +26,7 @@ _CHAT_LOCK = threading.Lock()
 
 class Chat:
     """
-    Unified chat client. Chooses OpenAI or AzureOpenAI based on LLM_PROVIDER.
+    Unified chat client. Chooses OpenAI or AzureOpenAI based on LLM_PROVIDER in settings.
     """
     def __init__(self):
         prov = settings.provider.provider
@@ -91,7 +91,7 @@ def llm_summarize_text(to_summarize: str, language: str = "English") -> str:
     prompt = PROMPTS["summarize_text"].format(text=to_summarize, language=language)
     return chat.generate(prompt).strip()
 
-# !! Currently not in use, but could be useful for batch operations. !!
+# !!Currently not in use, but could be useful for batch operations. !!
 def generate_many(prompts_and_systems: List[Tuple[str, Optional[str]]],
                   max_workers: Optional[int] = None) -> List[str]:
     """

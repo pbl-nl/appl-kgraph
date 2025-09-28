@@ -16,7 +16,7 @@ import hashlib
 # ─────────────────────────────────────────────────────────────
 
 def _sha256(s: str) -> str:
-    """Stable SHA-256 for cache keys (text & prompt)."""
+    """Helper to compute SHA-256 hash for prompt/document caching keys."""
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 # ─────────────────────────────────────────────────────────────
@@ -29,8 +29,8 @@ def build_entity_relation_prompt(
     entity_types: Optional[Iterable[str]] = None,
 ) -> str:
     """
-    Fill PROMPTS['entity_extraction'] for a single chunk of text. Also formats the
-    examples so they DO NOT contain '{record_delimiter}' literals.
+    Fill PROMPTS['entity_extraction'] with correct delimiters, language, examples, entity types to be used per chunk of text. Also formats the
+    examples so they DO NOT contain literals such as '{record_delimiter}'.
     """
     # 1) Base context for the prompt (without examples yet)
     examples_template = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
@@ -48,7 +48,7 @@ def build_entity_relation_prompt(
     examples = examples_template.format(**ctx)  # fill in delimiters, entity_types, language
     ctx["examples"] = examples
 
-    # 3) Finally format the main template
+    # 3) Finally format the main template (including the filled examples)
     template = PROMPTS["entity_extraction"]
     return template.format(**ctx)
 
@@ -134,7 +134,7 @@ def parse_model_output(
     if completion_delim in raw:
         raw = raw.split(completion_delim, 1)[0]
 
-    # Some models echo headings, keep only after "Output:" if present
+    # Some models may echo headings, keep only after "Output:" if present
     if "Output:" in raw:
         raw = raw.split("Output:", 1)[1]
 
@@ -215,39 +215,6 @@ def _require_chunk_uuid(chunk: Dict[str, Any]) -> str:
         raise KeyError("Each chunk MUST include 'chunk_uuid' (used as source_id).")
     return str(chunk["chunk_uuid"])
 
-# !! Currently not used, but could be useful for single-chunk extraction
-def extract_entities_relations_for_chunk(
-    chunk: Dict[str, Any],
-    client: Chat,
-    language: Optional[str] = None,
-    entity_types: Optional[Iterable[str]] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
-    """
-    Run the entity/relationship prompt for a single chunk and parse the result.
-    - Sets entity['source_id'] = chunk['chunk_uuid']
-    - Sets relation['source_id'] = chunk['chunk_uuid']
-    - Also carries 'filepath' (or 'filename') if present
-    """
-    text = _get_chunk_text(chunk)
-    prompt = build_entity_relation_prompt(text=text, language=language, entity_types=entity_types)
-    system = "You extract entities and relationships precisely in the required format. Do not add commentary."
-
-    raw = client.generate(prompt=prompt, system=system)
-    parsed = parse_model_output(raw)
-
-    # Attach source_id (strictly chunk_uuid) and filepath if provided on the chunk
-    source_id = _require_chunk_uuid(chunk)
-    filepath = chunk.get("filepath") or chunk.get("filename")
-
-    for e in parsed.entities:
-        e["source_id"] = source_id
-        e["filepath"] = filepath
-    for r in parsed.relationships:
-        r["source_id"] = source_id
-        r["filepath"] = filepath
-
-    return parsed.entities, parsed.relationships, parsed.content_keywords
-
 def extract_from_chunks(
     chunks: Iterable[Dict[str, Any]],
     language: Optional[str] = None,
@@ -258,14 +225,14 @@ def extract_from_chunks(
     High-level convenience: iterate chunks, call LLM, parse, and return collected results.
     Returns dict with 'entities', 'relationships', 'content_keywords'.
 
-    PERFORMANCE (no functional change, no prompt changes):
+    PERFORMANCE ENHANCEMENTS:
     - Reuses a single Chat client (singleton) to keep HTTP sessions hot.
     - Adds a content-addressed LLM cache in SQLite (model + prompt_sha + text_sha).
       *Cache stores RAW model text; on hits we parse it exactly like fresh outputs.*
     - Calls the LLM ONLY for cache misses; hits are stitched back in order.
     - Runs LLM calls for misses concurrently (bounded by settings-based concurrency).
 
-    SETTINGS (instead of .env):
+    SETTINGS (from settings.py):
     - Concurrency:  settings.perf.max_concurrency       (fallback 6 if missing)
     - Cache on/off: settings.perf.cache_enabled         (fallback True if missing)
     - Cache TTL:    settings.perf.cache_max_age_hours   (fallback 720 if missing)
@@ -274,9 +241,9 @@ def extract_from_chunks(
     - Even on cache hits, each extracted record is stamped with this file/chunk's
       source identifiers so cross-file queries remain accurate.
 
-    NOTE:
-    - Prompts are built with your existing `build_entity_relation_prompt(...)`.
-    - Parsing uses your existing `parse_model_output(...)`.
+    NOTES:
+    - Prompts are built with `build_entity_relation_prompt(...)`.
+    - Parsing uses `parse_model_output(...)`.
     - The #TODO you added is preserved below (applied per-chunk after parsing).
     """
     # Pull settings
@@ -284,16 +251,13 @@ def extract_from_chunks(
     CACHE_ENABLED = settings.llmperf.cache_enabled
     CACHE_MAX_AGE_HOURS = settings.llmperf.cache_max_age_hours
 
-    # 1) Shared LLM client + storage handles
+    # 1) Shared LLM client + create Storage facade that connects to SQLite & vector DB
     chat = client or Chat.singleton()
     storage: Optional[Storage]
     try:
         storage = Storage()
-    except RuntimeError as exc:
-        if "chromadb" in str(exc).lower():
-            storage = None
-        else:
-            raise
+    except:
+        raise
     else:
         storage.init()
 
@@ -319,7 +283,7 @@ def extract_from_chunks(
     raw_outputs: List[Optional[str]] = [None] * len(chunk_list)
     to_run: List[int] = []
 
-    if CACHE_ENABLED and storage is not None:
+    if CACHE_ENABLED:
         for i, (psha, tsha) in enumerate(keys):
             cached = storage.get_llm_cache(model_name, psha, tsha, CACHE_MAX_AGE_HOURS)
             if cached is not None:
@@ -379,6 +343,39 @@ def extract_from_chunks(
 # ─────────────────────────────────────────────────────────────
 # CLI (optional) — quick test driver
 # ─────────────────────────────────────────────────────────────
+
+# !! Currently not used, but could be useful for single-chunk extraction
+def extract_entities_relations_for_chunk(
+    chunk: Dict[str, Any],
+    client: Chat,
+    language: Optional[str] = None,
+    entity_types: Optional[Iterable[str]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    """
+    Run the entity/relationship prompt for a single chunk and parse the result.
+    - Sets entity['source_id'] = chunk['chunk_uuid']
+    - Sets relation['source_id'] = chunk['chunk_uuid']
+    - Also carries 'filepath' (or 'filename') if present
+    """
+    text = _get_chunk_text(chunk)
+    prompt = build_entity_relation_prompt(text=text, language=language, entity_types=entity_types)
+    system = "You extract entities and relationships precisely in the required format. Do not add commentary."
+
+    raw = client.generate(prompt=prompt, system=system)
+    parsed = parse_model_output(raw)
+
+    # Attach source_id (strictly chunk_uuid) and filepath if provided on the chunk
+    source_id = _require_chunk_uuid(chunk)
+    filepath = chunk.get("filepath") or chunk.get("filename")
+
+    for e in parsed.entities:
+        e["source_id"] = source_id
+        e["filepath"] = filepath
+    for r in parsed.relationships:
+        r["source_id"] = source_id
+        r["filepath"] = filepath
+
+    return parsed.entities, parsed.relationships, parsed.content_keywords
 
 def _load_chunks_from_path(path: str) -> List[Dict[str, Any]]:
     """
@@ -440,7 +437,7 @@ if __name__ == "__main__":
 
     chunks = _default_demo_chunks() if not args.chunks else _load_chunks_from_path(args.chunks)
 
-    client = Chat.singleton()  # reads env
+    client = Chat.singleton()
     result = extract_from_chunks(chunks, language=language, entity_types=entity_types, client=client)
 
     # Pretty print

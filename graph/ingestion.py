@@ -14,7 +14,9 @@ from settings import settings
 import os
 import hashlib
 
-# Helpers -------------------------------------------
+#--------------------------------------------------
+# Helpers 
+#--------------------------------------------------
 
 def normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     # Lower-case keys, unify language key
@@ -331,8 +333,6 @@ def group_edges(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str,
 
     return merged
 
-
-
 def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations: List[Dict[str, Any]]):
     """Merges new entities and relations with existing ones in the storage."""
     merged_entities = []
@@ -358,8 +358,7 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
     Ensure that nodes exist for every endpoint referenced in the provided edges.
 
     - Node identity is based on the node name only (string equality).
-    - Since we no longer extract or propagate `source_type` / `target_type` from edges,
-      this function does not update node types.
+    - Note to self: Does not update node types anymore because we don't extract src/tgt types.
     - Newly created nodes are given type "unknown" and empty metadata fields.
     - Existing nodes are left unchanged.
 
@@ -442,23 +441,23 @@ def ingest_paths(paths: List[Path]):
             "filepath": str(p),                          # keep if useful for tracing
             "file_size": st.st_size,
             "last_modified": st.st_mtime,
-            "created": st.st_mtime,                      # or time.time()
+            "created": st.st_mtime,                      
             "extension": p.suffix.lower(),
             "mime_type": ((file_meta or {}).get("mime_type") or mimetypes.guess_type(str(p))[0] or ""),
             "language": (file_meta or {}).get("language", "unknown"),
             "content_hash": content_hash,                
             "full_char_count": len(full_text),
         }
-              
-        storage.add_document(doc_meta, full_text)
+
+        storage.add_document(doc_meta, full_text)  # from storage.py
 
         chunks = build_chunks(pages, doc_meta["doc_id"], doc_meta["filename"])
-        storage.add_chunks(chunks)
+        storage.add_chunks(chunks)  # from storage.py
         all_chunks.extend(chunks)
 
         # Extract entities and relations from chunks
         # res['entities'], res['relationships'], res['content_keywords']
-        res = extract_from_chunks(chunks)
+        res = extract_from_chunks(chunks)  # from extractor.py
         
         # Consolidate/merge entities (by (name,type)) and upsert those first
         entities_in = res.get("entities", []) or []
@@ -482,7 +481,7 @@ def ingest_paths(paths: List[Path]):
 
     # Finally, add all chunks, entities, and relations to vector DB   
     if all_chunks:
-        storage.upsert_chunk_vector(all_chunks)
+        storage.upsert_chunk_vector(all_chunks) # from storage.py
         deduped_entities = dedupe_entities_for_vectors(all_entities)
         if all_chunks:
             print(f"[ingestion] sample chunk: {all_chunks[0]}")

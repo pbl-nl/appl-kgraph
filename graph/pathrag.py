@@ -10,24 +10,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import networkx as nx
 import tiktoken
 
-try:  # pragma: no cover - the ingestion package provides these modules
-    from storage import Storage as IngestionStorage
-    from storage import StoragePaths
-except ImportError as exc:  # pragma: no cover - surface a helpful error message
-    raise ImportError(
-        "The ingestion storage module could not be imported. "
-        "Ensure that the PathRAG ingestion package is installed and available "
-        "on PYTHONPATH before initialising the retriever."
-    ) from exc
-
-try:  # pragma: no cover - consumers are expected to provide this module
-    from llm import Chat as IngestionChat
-except ImportError as exc:  # pragma: no cover - surface a useful error message
-    raise ImportError(
-        "The ingestion 'llm' module could not be imported. Ensure the PathRAG "
-        "ingestion package (or equivalent) is available on PYTHONPATH before "
-        "initialising the retriever."
-    ) from exc
+from storage import Storage
+from storage import StoragePaths
+from llm import Chat
 
 
 LOGGER = logging.getLogger("PathRAG")
@@ -218,7 +203,7 @@ class StorageAdapter:
     """High level helper around the ingestion ``Storage`` facade."""
 
     def __init__(self, paths: Optional[StoragePaths] = None):
-        self._storage = IngestionStorage(paths=paths)
+        self._storage = Storage(paths=paths)
         # Ensure tables exist before we start querying them.
         self._storage.init()
         self._graph_snapshot: Optional[GraphSnapshot] = None
@@ -481,7 +466,7 @@ def _distance_to_similarity(value: Any) -> float:
 
 
 @dataclass
-class AsyncChat:
+class RetrieveChat:
     """Lightweight async wrapper around :class:`llm.Chat`."""
 
     system_prompt: Optional[str] = None
@@ -495,7 +480,7 @@ class AsyncChat:
     ) -> str:
         """Run :meth:`llm.Chat.generate` in a worker thread."""
 
-        chat = IngestionChat.singleton()
+        chat = Chat.singleton()
         return await asyncio.to_thread(
             chat.generate,
             prompt,
@@ -587,7 +572,7 @@ class PathRAG:
         LOGGER.info("Initialising PathRAG retriever")
         self._config = config or RetrieverConfig()
         self._storage = StorageAdapter(paths=storage_paths)
-        self._chat = AsyncChat(system_prompt=system_prompt)
+        self._chat = RetrieveChat(system_prompt=system_prompt)
 
     # ------------------------------------------------------------------
     # Retrieval entry points

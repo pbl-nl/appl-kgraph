@@ -5,21 +5,85 @@ from prompts import PROMPTS
 from settings import settings
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from openai import OpenAI, AzureOpenAI
 
+# ---------------------------
+# Embeddings
+# ---------------------------
 
-# ─────────────────────────────────────────────────────────────
-# Azure OpenAI chat client (env-driven)
-#   Required env vars:
-#     - AZURE_OPENAI_ENDPOINT
-#     - AZURE_OPENAI_API_KEY
-#     - AZURE_OPENAI_CHAT_DEPLOYMENT_NAME   (the chat model deployment name)
-#     - AZURE_OPENAI_API_VERSION            (optional, defaults to 2024-02-15-preview)
-# ─────────────────────────────────────────────────────────────
-try:
-    from openai import OpenAI, AzureOpenAI  # type: ignore
-except Exception:
-    OpenAI = None  # type: ignore
-    AzureOpenAI = None  # type: ignore
+class Embedder:
+    """
+    Provider-agnostic embeddings.
+    For OpenAI:
+      - OPENAI_API_KEY, OPENAI_EMBEDDINGS_MODEL, [OPENAI_BASE_URL]
+    For Azure:
+      - AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_EMB_DEPLOYMENT_NAME
+    """
+    def __init__(
+        self,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        azure_endpoint: Optional[str] = None,
+        azure_api_version: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        prov = (provider or settings.provider.provider).strip().lower()
+        self.provider = prov
+        self._dimension = None  # Dimensionality property for compatibility between LLMs
+
+        if prov == "azure":
+            if AzureOpenAI is None:
+                raise RuntimeError("openai package not installed. pip install openai")
+            self.model = model or settings.provider.azure_embeddings_deployment
+            key = api_key or settings.provider.azure_api_key
+            endpoint = azure_endpoint or settings.provider.azure_endpoint
+            version = azure_api_version or settings.provider.azure_api_version
+            if not (self.model and key and endpoint):
+                raise RuntimeError("Set AZURE_OPENAI_EMB_DEPLOYMENT_NAME, AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT.")
+            self.client = AzureOpenAI(api_key=key, api_version=version, azure_endpoint=endpoint)
+
+        elif prov == "openai":
+            if OpenAI is None:
+                raise RuntimeError("openai package not installed. pip install openai")
+            self.model = model or (settings.provider.openai_embeddings_model or "text-embedding-3-small")
+            key = api_key or settings.provider.openai_api_key
+            base = base_url or settings.provider.openai_base_url
+            if not (self.model and key):
+                raise RuntimeError("Set OPENAI_API_KEY and OPENAI_EMBEDDINGS_MODEL.")
+            self.client = OpenAI(api_key=key, base_url=base) if base else OpenAI(api_key=key)
+
+        else:
+            raise RuntimeError("LLM_PROVIDER must be 'openai' or 'azure'.")
+
+    @property
+    def dimension(self) -> int:
+        """
+        Lazily fetch the embedding dimensionality once (cached).
+        """
+        if self._dimension is None:
+            # one cheap call
+            resp = self.client.embeddings.create(input=[" "], model=self.model)
+            self._dimension = len(resp.data[0].embedding)
+        return self._dimension
+    
+    def embed_texts(self, texts: Iterable[str], batch_size: int = settings.embeddings.batch_size) -> List[List[float]]:
+        out: List[List[float]] = []
+        batch: List[str] = []
+        for t in texts:
+            batch.append(t)
+            if len(batch) >= batch_size:
+                resp = self.client.embeddings.create(input=batch, model=self.model)  # both OpenAI & Azure
+                out.extend([d.embedding for d in resp.data])
+                batch = []
+        if batch:
+            resp = self.client.embeddings.create(input=batch, model=self.model)
+            out.extend([d.embedding for d in resp.data])
+        return out
+
+# ---------------------------
+# Chat completions
+# ---------------------------
 
 _CHAT_SINGLETON = None
 _CHAT_LOCK = threading.Lock()

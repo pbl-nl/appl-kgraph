@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections import defaultdict
 
 import networkx as nx
 import tiktoken
@@ -113,10 +114,179 @@ def join_non_empty(parts: Iterable[str], delimiter: str = "\n") -> str:
     return delimiter.join(part for part in parts if part)
 
 
+#----------------------------------------------------------------------------
+# Contex window helpers
+#----------------------------------------------------------------------------
+
+def _find_paths_up_to_k(graph: nx.Graph, sources: List[str], *, max_depth: int) -> Dict[Tuple[str, str], List[List[str]]]:
+    """Collect all simple paths up to max_depth between distinct seed pairs."""
+    results: Dict[Tuple[str, str], List[List[str]]] = defaultdict(list)
+    if max_depth <= 0 or len(sources) < 2:
+        return results
+    srcs = [s for s in sources if s in graph]
+    for i, s in enumerate(srcs):
+        for t in srcs[i+1:]:
+            # enumerate all simple paths up to max_depth edges (max_depth nodes-1)
+            try:
+                # networkx returns generator; we cap by cutoff
+                for p in nx.all_simple_paths(graph, source=s, target=t, cutoff=max_depth):
+                    # Keep only 1..max_depth edges (i.e., len(path)-1 in [1..max_depth])
+                    if 2 <= len(p) <= (max_depth + 1):
+                        results[(s, t)].append(p)
+            except nx.NetworkXNoPath:
+                continue
+    return results
+
+def _bfs_weighted_paths(paths_by_pair: Dict[Tuple[str, str], List[List[str]]],
+                        *,
+                        threshold: float,
+                        alpha: float) -> List[Tuple[List[str], float]]:
+    """
+    Replicates the weighting logic from the inspiration:
+    - Build a follow_dict from enumerated paths.
+    - Propagate weights with thresholding and alpha decay up to length 3.
+    - Score each path by average edge weight across its edges.
+    """
+    combined: List[Tuple[List[str], float]] = []
+    for (source, target), paths in paths_by_pair.items():
+        if not paths:
+            continue
+
+        follow_dict: Dict[str, set] = {}
+        for p in paths:
+            for i in range(len(p) - 1):
+                cur, nxt = p[i], p[i+1]
+                follow_dict.setdefault(cur, set()).add(nxt)
+
+        edge_weights: Dict[Tuple[str, str], float] = defaultdict(float)
+
+        # fan-out from source to depth<=3 using follow_dict (not the whole graph)
+        if source not in follow_dict:
+            # still score the enumerated paths with zero weights
+            combined.extend((p, 0.0) for p in paths)
+            continue
+
+        # depth 1
+        for n1 in follow_dict[source]:
+            edge_weights[(source, n1)] += 1.0 / max(1, len(follow_dict[source]))
+
+        # depth 2
+        for n1 in follow_dict.get(source, []):
+            if edge_weights[(source, n1)] > threshold:
+                children = follow_dict.get(n1, [])
+                for n2 in children:
+                    w = edge_weights[(source, n1)] * alpha / max(1, len(children))
+                    edge_weights[(n1, n2)] += w
+
+        # depth 3
+        for n1 in follow_dict.get(source, []):
+            if edge_weights[(source, n1)] > threshold:
+                for n2 in follow_dict.get(n1, []):
+                    if edge_weights[(n1, n2)] > threshold:
+                        children = follow_dict.get(n2, [])
+                        for n3 in children:
+                            w = edge_weights[(n1, n2)] * alpha / max(1, len(children))
+                            edge_weights[(n2, n3)] += w
+
+        # score each enumerated path by avg edge weight
+        for p in paths:
+            if len(p) < 2:
+                combined.append((p, 0.0))
+                continue
+            total = 0.0
+            cnt = 0
+            for i in range(len(p) - 1):
+                e = (p[i], p[i+1])
+                total += edge_weights.get(e, 0.0)
+                cnt += 1
+            combined.append((p, (total / cnt) if cnt else 0.0))
+
+    # sort descending by score
+    combined.sort(key=lambda x: x[1], reverse=True)
+    return combined
+
+def _format_path_context(graph: nx.Graph, path: List[str]) -> str:
+    """
+    Build a concise narrative for a 1/2/3-hop path using node/edge attrs from the in-memory graph.
+    Uses node attrs: type, description; edge attrs: keywords, description.
+    """
+    segs: List[str] = []
+    def node_desc(n: str) -> str:
+        data = graph.nodes.get(n, {})
+        typ = (data.get("type") or "unknown")
+        desc = (data.get("description") or "").strip()
+        return f"{n} ({typ})" + (f": {desc}" if desc else "")
+
+    def edge_desc(a: str, b: str) -> str:
+        data = graph.get_edge_data(a, b, default={})
+        kw = (data.get("keywords") or "").strip()
+        dsc = (data.get("description") or "").strip()
+        parts = []
+        if kw: parts.append(f"keywords={kw}")
+        if dsc: parts.append(f"{dsc}")
+        return " | ".join(parts)
+
+    # Example: A --[edge info]--> B --[...]--> C ...
+    segs.append(node_desc(path[0]))
+    for i in range(len(path)-1):
+        a, b = path[i], path[i+1]
+        ed = edge_desc(a, b)
+        arrow = " → "
+        if ed:
+            segs.append(f"{arrow}[{ed}]{arrow}{node_desc(b)}")
+        else:
+            segs.append(f"{arrow}{node_desc(b)}")
+    return "".join(segs)
+
+def build_path_windows(
+    adapter: "StorageAdapter",
+    seeds: Sequence["EntityMatch"],
+    *,
+    use_top_entities: int,
+    max_depth: int,
+    threshold: float,
+    alpha: float,
+    max_windows: int,
+    max_tokens: int,
+    model: str,
+    label_prefix: str = "",
+) -> List["ContextWindow"]:
+    """
+    PathRAG-style: enumerate simple paths up to `max_depth` between top-K seed entities,
+    score via threshold+alpha propagation, and emit top windows as context.
+    """
+    if not seeds:
+        return []
+
+    graph = adapter.graph  # in-memory NetworkX
+    # pick top-K seeds that actually exist in the graph
+    seed_names = [s.name for s in seeds if s.name in graph][:use_top_entities]
+    if len(seed_names) < 2:
+        return []
+
+    paths_by_pair = _find_paths_up_to_k(graph, seed_names, max_depth=max_depth)
+    scored = _bfs_weighted_paths(paths_by_pair, threshold=threshold, alpha=alpha)
+    if not scored:
+        return []
+
+    windows: List[ContextWindow] = []
+    taken_pairs = set()  # optional: avoid spamming same pair
+    for path, score in scored:
+        if len(windows) >= max_windows:
+            break
+        pair = (path[0], path[-1])
+        if pair in taken_pairs:
+            continue
+        text = _format_path_context(graph, path)
+        text = truncate_by_tokens(text, max_tokens, model)
+        label = f"{label_prefix}path::{path[0]}→{path[-1]} (len={len(path)-1})"
+        windows.append(ContextWindow(label=label, text=text, score=score))
+        taken_pairs.add(pair)
+    return windows
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class EntityMatch:
@@ -184,7 +354,17 @@ class RetrieverConfig:
     chunk_window_tokens: int = 512
     tiktoken_model: str = "gpt-4o-mini"
     llm_max_tokens: int = 512
-    llm_temperature: float = 0.2
+    llm_temperature: float = 0.0
+    path_use_top_entities: int = 5   # limit the number of entity seeds considered
+    path_max_depth: int = 3          # search up to 3 hops
+    path_threshold: float = 0.3      # propagation threshold
+    path_alpha: float = 0.8          # propagation decay
+    path_max_windows: int = 5        # how many path windows to emit
+    path_window_tokens: int = 512    # tokens per path window
+    hybrid_use_paths_for_global: bool = True   # whether to build global context from paths
+    global_max_windows: int = 4                # max global context windows
+    global_window_tokens: int = 512            # token cap per global window
+    local_max_windows: int = 6                 # cap total local windows
 
 
 @dataclass(frozen=True)
@@ -503,6 +683,7 @@ def build_graph_windows(
     max_windows: int,
     max_tokens: int,
     model: str,
+    label_prefix: str = "",
 ) -> List[ContextWindow]:
     descriptions = adapter.describe_subgraph([seed.name for seed in seeds], depth=depth)
     windows: List[ContextWindow] = []
@@ -510,7 +691,7 @@ def build_graph_windows(
     for seed, text in descriptions:
         trimmed = truncate_by_tokens(text, max_tokens, model)
         windows.append(
-            ContextWindow(label=f"graph::{seed}", text=trimmed, score=score_by_seed.get(seed, 1.0))
+            ContextWindow(label=f"{label_prefix}graph::{seed}", text=trimmed, score=score_by_seed.get(seed, 1.0))
         )
         if len(windows) >= max_windows:
             break
@@ -523,11 +704,12 @@ def build_chunk_windows(
     max_windows: int,
     max_tokens: int,
     model: str,
+    label_prefix: str = "",
 ) -> List[ContextWindow]:
     windows: List[ContextWindow] = []
     for chunk in chunks[:max_windows]:
         snippet = truncate_by_tokens(chunk.text, max_tokens, model)
-        label = f"chunk::{chunk.filename or chunk.document_id}"
+        label = f"{label_prefix}chunk::{chunk.filename or chunk.document_id}"
         windows.append(ContextWindow(label=label, text=snippet, score=chunk.score))
     return windows
 
@@ -558,7 +740,11 @@ RAG_PROMPT = (
 
 
 class PathRAG:
-    """Minimal retriever that relies on the ingestion storage backend."""
+    """ PathRAG retriever that integrates storage and LLM to answer questions.
+    Example usage:
+        rag = PathRAG(storage_paths=StoragePaths(...), system_prompt="You are a helpful assistant.")
+        result = rag.retrieve("What is the capital of France?")
+    """
 
     def __init__(
         self,
@@ -585,21 +771,82 @@ class PathRAG:
         relation_matches = self._storage.query_relations(question, limit=cfg.relation_top_k)
         chunk_matches = self._storage.query_chunks(question, limit=cfg.chunk_top_k)
 
-        graph_windows = build_graph_windows(
-            self._storage,
-            entity_matches,
-            depth=cfg.graph_depth,
-            max_windows=cfg.graph_windows,
-            max_tokens=cfg.graph_window_tokens,
-            model=cfg.tiktoken_model,
-        )
-        chunk_windows = build_chunk_windows(
-            chunk_matches,
-            max_windows=cfg.chunk_windows,
-            max_tokens=cfg.chunk_window_tokens,
-            model=cfg.tiktoken_model,
-        )
-        context_windows = merge_windows(graph_windows, chunk_windows)
+        def build_global_windows(
+            adapter: "StorageAdapter",
+            seeds: Sequence["EntityMatch"],
+            *,
+            cfg: RetrieverConfig,
+        ) -> List["ContextWindow"]:
+            """
+            Build high-level (global) context windows using path-finding between entities.
+            - Uses top-K entity seeds.
+            - Enumerates paths up to depth (hops).
+            - Weights and ranks paths (PathRAG-style).
+            - Returns ContextWindows labeled 'global::path::<src>→<tgt>'.
+            """
+            if not cfg.hybrid_use_paths_for_global or not seeds:
+                return []
+
+            # weighted paths between top entities
+            path_windows = build_path_windows(
+                adapter,
+                seeds,
+                use_top_entities=cfg.path_use_top_entities,
+                max_depth=cfg.path_max_depth,
+                threshold=cfg.path_threshold,
+                alpha=cfg.path_alpha,
+                max_windows=cfg.global_max_windows,
+                max_tokens=cfg.global_window_tokens,
+                model=cfg.tiktoken_model,
+                label_prefix="global::",
+            )
+            return path_windows
+        
+        def build_local_windows(
+            adapter: "StorageAdapter",
+            seeds: Sequence["EntityMatch"],
+            chunks: Sequence["ChunkMatch"],
+            *,
+            cfg: RetrieverConfig,
+        ) -> List["ContextWindow"]:
+            """
+            Build low-level (local) context windows.
+            - Includes raw chunk windows (from vector search).
+            - Optionally includes graph neighborhoods (subgraph).
+            - Returns ContextWindows labeled 'local::chunk' or 'local::graph'.
+            """
+            # chunk windows
+            chunk_windows = build_chunk_windows(
+                chunks,
+                max_windows=cfg.chunk_windows,
+                max_tokens=cfg.chunk_window_tokens,
+                model=cfg.tiktoken_model,
+                label_prefix="local::",
+            )
+
+            # graph neighborhood windows (your existing subgraph expansion)
+            graph_windows = build_graph_windows(
+                adapter,
+                seeds,
+                depth=cfg.graph_depth,
+                max_windows=cfg.graph_windows,
+                max_tokens=cfg.graph_window_tokens,
+                model=cfg.tiktoken_model,
+                label_prefix="local::",
+            )
+
+            # cap total local windows
+            local = chunk_windows + graph_windows
+            return local[:cfg.local_max_windows]
+
+        # Assemble global context windows
+        global_windows = build_global_windows(self._storage, entity_matches, cfg=cfg)
+
+        # Assemble local context windows
+        local_windows = build_local_windows(self._storage, entity_matches, chunk_matches, cfg=cfg)
+
+        # Merge and format for prompt
+        context_windows = global_windows + local_windows
         context_block = format_windows_for_prompt(context_windows)
 
         prompt = RAG_PROMPT.format(context=context_block, question=question)
@@ -628,7 +875,6 @@ class PathRAG:
                 "retrieve() cannot be used when an event loop is already running. "
                 "Use 'await aretrieve(...)' instead."
             )
-
 
 __all__ = [
     "PathRAG",

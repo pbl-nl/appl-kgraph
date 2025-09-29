@@ -150,6 +150,43 @@ class StoragePaths:
     chroma_relations: str = "./storage/chroma_relations"
 
 @dataclass(frozen=True)
+class RetrievalSettings:
+    """
+    Settings for retrieval operations (e.g. how many results to return).
+    """
+    entity_top_k: int = 5
+    relation_top_k: int = 5
+    chunk_top_k: int = 6
+    graph_depth: int = 2
+    graph_windows: int = 3
+    chunk_windows: int = 3
+    graph_window_tokens: int = 512
+    chunk_window_tokens: int = 512
+    tiktoken_model: str = "gpt-4o-mini"  # for token counting
+    llm_max_tokens: int = 512
+    llm_temperature: float = 0.0
+
+    # --- Hybrid/global (i.e. do we use paths & relations?) ---
+    hybrid_use_paths_for_global: bool = True # whether to build global context from paths
+    hybrid_use_relations_for_global: bool = False   # whether to build global context from relations
+    global_max_windows: int = 4 # max global context windows
+    global_window_tokens: int = 512 # token cap per global window
+
+    # --- Local toggles (i.e. do we use chunks and local neighborhoods?) ---
+    use_local_chunks: bool = True # whether to use local chunks
+    use_local_graph: bool = True # whether to use local graph
+    local_max_windows: int = 6 # cap total local windows
+
+    # --- PathRAG-specific retrieval settings ---
+    path_use_top_entities: int = 5   # limit the number of entity seeds considered
+    path_max_depth: int = 3          # search up to 3 hops
+    path_threshold: float = 0.3      # propagation threshold
+    path_alpha: float = 0.8          # propagation decay
+    path_max_windows: int = 5        # how many path windows to emit
+    path_window_tokens: int = 512    # tokens per path window
+    
+
+@dataclass(frozen=True)
 class Settings:
     """
     Full application settings bundle.
@@ -162,6 +199,9 @@ class Settings:
     ingestion: IngestionMergeSettings
     chunking: ChunkingSettings
     storage: StoragePaths
+    retrieval: RetrievalSettings
+
+
 
 # ─────────────────────────────────────────────────────────────
 # Loader / validator
@@ -258,6 +298,36 @@ def load_settings() -> Settings:
         chroma_relations=env_str("CHROMA_RELATIONS_PATH", "./storage/chroma_relations") or "./storage/chroma_relations",
     )
 
+    retrieval = RetrievalSettings(
+        entity_top_k=env_int("RETRIEVAL_ENTITY_TOP_K", 5),
+        relation_top_k=env_int("RETRIEVAL_RELATION_TOP_K", 5),
+        chunk_top_k=env_int("RETRIEVAL_CHUNK_TOP_K", 6),
+        graph_depth=env_int("RETRIEVAL_GRAPH_DEPTH", 2),
+        graph_windows=env_int("RETRIEVAL_GRAPH_WINDOWS", 3),
+        chunk_windows=env_int("RETRIEVAL_CHUNK_WINDOWS", 3),
+        graph_window_tokens=env_int("RETRIEVAL_GRAPH_WINDOW_TOKENS", 512),
+        chunk_window_tokens=env_int("RETRIEVAL_CHUNK_WINDOW_TOKENS", 512),
+        tiktoken_model = env_str("RETRIEVAL_TIKTOKEN_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
+        llm_max_tokens = env_int("RETRIEVAL_LLM_MAX_TOKENS", 512),
+        llm_temperature = env_float("RETRIEVAL_LLM_TEMPERATURE", 0.0),
+        # Hybrid/global
+        hybrid_use_paths_for_global = env_bool("RETRIEVAL_HYBRID_USE_PATHS_FOR_GLOBAL", True),
+        hybrid_use_relations_for_global = env_bool("RETRIEVAL_HYBRID_USE_RELATIONS_FOR_GLOBAL", False),
+        global_max_windows = env_int("RETRIEVAL_GLOBAL_MAX_WINDOWS", 4),
+        global_window_tokens = env_int("RETRIEVAL_GLOBAL_WINDOW_TOKENS", 512),
+        # Local
+        use_local_chunks = env_bool("RETRIEVAL_USE_LOCAL_CHUNKS", True),
+        use_local_graph = env_bool("RETRIEVAL_USE_LOCAL_GRAPH", True),
+        local_max_windows = env_int("RETRIEVAL_LOCAL_MAX_WINDOWS", 6),
+        # PathRAG-specific
+        path_use_top_entities = env_int("RETRIEVAL_PATH_USE_TOP_ENTITIES", 5),
+        path_max_depth = env_int("RETRIEVAL_PATH_MAX_DEPTH", 3),
+        path_threshold = env_float("RETRIEVAL_PATH_THRESHOLD", 0.3),
+        path_alpha = env_float("RETRIEVAL_PATH_ALPHA", 0.8),
+        path_max_windows = env_int("RETRIEVAL_PATH_MAX_WINDOWS", 5),
+        path_window_tokens = env_int("RETRIEVAL_PATH_WINDOW_TOKENS", 512),
+    )
+
     return Settings(
         provider=provider,
         chat=chat,
@@ -267,6 +337,7 @@ def load_settings() -> Settings:
         ingestion=ingestion,
         chunking=chunking,
         storage=storage,
+        retrieval=retrieval,
     )
 
 

@@ -8,7 +8,7 @@ from pathrag import render_full_context
 
 async def ask_with_pathrag(question: str, verbose: bool = False) -> None:
     rag = PathRAG(
-        system_prompt="You are a helpful assistant that answers with the supplied evidence."
+        system_prompt=""
     )
     result = await rag.aretrieve(question)
     print("Answer:\n", result.answer)

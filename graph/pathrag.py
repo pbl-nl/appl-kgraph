@@ -11,9 +11,11 @@ from collections import defaultdict
 import networkx as nx
 import tiktoken
 
+from settings import settings
 from storage import Storage
 from storage import StoragePaths
 from llm import Chat
+from prompts import PROMPTS
 
 
 LOGGER = logging.getLogger("PathRAG")
@@ -284,6 +286,25 @@ def build_path_windows(
         taken_pairs.add(pair)
     return windows
 
+def render_history(history: Optional[List[Tuple[str, str]]], *, max_turns: int = 4, max_chars_per_turn: int = 800) -> str:
+    """
+    history: list of (role, text) pairs; roles "user" or "assistant".
+    Returns a compact plaintext block for the template.
+    """
+    if not history:
+        return ""
+    # keep only the last N turns
+    tail = history[-max_turns:]
+    lines = []
+    for role, text in tail:
+        if not text:
+            continue
+        s = text.strip()
+        if len(s) > max_chars_per_turn:
+            s = s[:max_chars_per_turn] + "…"
+        lines.append(f"{role}: {s}")
+    return "\n".join(lines)
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -338,34 +359,6 @@ class RetrievalResult:
     entity_matches: List[EntityMatch]
     relation_matches: List[RelationMatch]
     chunk_matches: List[ChunkMatch]
-
-
-@dataclass
-class RetrieverConfig:
-    """Tunable knobs that control how evidence is assembled."""
-
-    entity_top_k: int = 5
-    relation_top_k: int = 5
-    chunk_top_k: int = 6
-    graph_depth: int = 2
-    graph_windows: int = 3
-    chunk_windows: int = 3
-    graph_window_tokens: int = 512
-    chunk_window_tokens: int = 512
-    tiktoken_model: str = "gpt-4o-mini"
-    llm_max_tokens: int = 512
-    llm_temperature: float = 0.0
-    path_use_top_entities: int = 5   # limit the number of entity seeds considered
-    path_max_depth: int = 3          # search up to 3 hops
-    path_threshold: float = 0.3      # propagation threshold
-    path_alpha: float = 0.8          # propagation decay
-    path_max_windows: int = 5        # how many path windows to emit
-    path_window_tokens: int = 512    # tokens per path window
-    hybrid_use_paths_for_global: bool = True   # whether to build global context from paths
-    global_max_windows: int = 4                # max global context windows
-    global_window_tokens: int = 512            # token cap per global window
-    local_max_windows: int = 6                 # cap total local windows
-
 
 @dataclass(frozen=True)
 class GraphSnapshot:
@@ -727,7 +720,7 @@ def format_windows_for_prompt(windows: Iterable[ContextWindow]) -> str:
 # Prompt template
 # ---------------------------------------------------------------------------
 
-
+# !! lightweight placeholder for testing, replace with imported PROMPT when finished.
 RAG_PROMPT = (
     "You are a helpful assistant. Use the supplied context to answer the question."
     "\n\nContext:\n{context}\n\nQuestion: {question}\nAnswer in Markdown."
@@ -752,11 +745,9 @@ class PathRAG:
         storage_paths: Optional[StoragePaths] = None,
         system_prompt: Optional[str] = None,
         log_file: str = "PathRAG.log",
-        config: Optional[RetrieverConfig] = None,
     ) -> None:
         set_logger(log_file)
         LOGGER.info("Initialising PathRAG retriever")
-        self._config = config or RetrieverConfig()
         self._storage = StorageAdapter(paths=storage_paths)
         self._chat = RetrieveChat(system_prompt=system_prompt)
 
@@ -765,17 +756,14 @@ class PathRAG:
     # ------------------------------------------------------------------
     async def aretrieve(self, question: str) -> RetrievalResult:
         LOGGER.info("Running retrieval for query: %s", question)
-        cfg = self._config
 
-        entity_matches = self._storage.query_entities(question, limit=cfg.entity_top_k)
-        relation_matches = self._storage.query_relations(question, limit=cfg.relation_top_k)
-        chunk_matches = self._storage.query_chunks(question, limit=cfg.chunk_top_k)
+        entity_matches = self._storage.query_entities(question, limit=settings.retrieval.entity_top_k)
+        relation_matches = self._storage.query_relations(question, limit=settings.retrieval.relation_top_k)
+        chunk_matches = self._storage.query_chunks(question, limit=settings.retrieval.chunk_top_k)
 
         def build_global_windows(
             adapter: "StorageAdapter",
             seeds: Sequence["EntityMatch"],
-            *,
-            cfg: RetrieverConfig,
         ) -> List["ContextWindow"]:
             """
             Build high-level (global) context windows using path-finding between entities.
@@ -784,20 +772,20 @@ class PathRAG:
             - Weights and ranks paths (PathRAG-style).
             - Returns ContextWindows labeled 'global::path::<src>→<tgt>'.
             """
-            if not cfg.hybrid_use_paths_for_global or not seeds:
+            if not settings.retrieval.hybrid_use_paths_for_global or not seeds:
                 return []
 
             # weighted paths between top entities
             path_windows = build_path_windows(
                 adapter,
                 seeds,
-                use_top_entities=cfg.path_use_top_entities,
-                max_depth=cfg.path_max_depth,
-                threshold=cfg.path_threshold,
-                alpha=cfg.path_alpha,
-                max_windows=cfg.global_max_windows,
-                max_tokens=cfg.global_window_tokens,
-                model=cfg.tiktoken_model,
+                use_top_entities=settings.retrieval.path_use_top_entities,
+                max_depth=settings.retrieval.path_max_depth,
+                threshold=settings.retrieval.path_threshold,
+                alpha=settings.retrieval.path_alpha,
+                max_windows=settings.retrieval.path_max_windows,
+                max_tokens=settings.retrieval.path_window_tokens,
+                model=settings.retrieval.tiktoken_model,
                 label_prefix="global::",
             )
             return path_windows
@@ -806,8 +794,6 @@ class PathRAG:
             adapter: "StorageAdapter",
             seeds: Sequence["EntityMatch"],
             chunks: Sequence["ChunkMatch"],
-            *,
-            cfg: RetrieverConfig,
         ) -> List["ContextWindow"]:
             """
             Build low-level (local) context windows.
@@ -815,35 +801,36 @@ class PathRAG:
             - Optionally includes graph neighborhoods (subgraph).
             - Returns ContextWindows labeled 'local::chunk' or 'local::graph'.
             """
-            # chunk windows
-            chunk_windows = build_chunk_windows(
-                chunks,
-                max_windows=cfg.chunk_windows,
-                max_tokens=cfg.chunk_window_tokens,
-                model=cfg.tiktoken_model,
-                label_prefix="local::",
-            )
+            # initialise empty list
+            local_windows: List[ContextWindow] = []
 
-            # graph neighborhood windows (your existing subgraph expansion)
-            graph_windows = build_graph_windows(
-                adapter,
-                seeds,
-                depth=cfg.graph_depth,
-                max_windows=cfg.graph_windows,
-                max_tokens=cfg.graph_window_tokens,
-                model=cfg.tiktoken_model,
-                label_prefix="local::",
-            )
+            if settings.retrieval.use_local_chunks and chunks:
+                local_windows += build_chunk_windows(
+                    chunks,
+                    max_windows=settings.retrieval.chunk_windows,          # FIXED
+                    max_tokens=settings.retrieval.chunk_window_tokens,     # FIXED
+                    model=settings.retrieval.tiktoken_model,
+                    label_prefix="local::",
+                )
+                
+            if settings.retrieval.use_local_graph and seeds:
+                local_windows += build_graph_windows(
+                    adapter,
+                    seeds,
+                    depth=settings.retrieval.graph_depth,
+                    max_windows=settings.retrieval.graph_windows,
+                    max_tokens=settings.retrieval.graph_window_tokens,
+                    model=settings.retrieval.tiktoken_model,
+                    label_prefix="local::",
+                )
 
-            # cap total local windows
-            local = chunk_windows + graph_windows
-            return local[:cfg.local_max_windows]
+            return local_windows[:settings.retrieval.local_max_windows]
 
         # Assemble global context windows
-        global_windows = build_global_windows(self._storage, entity_matches, cfg=cfg)
+        global_windows = build_global_windows(self._storage, entity_matches)
 
         # Assemble local context windows
-        local_windows = build_local_windows(self._storage, entity_matches, chunk_matches, cfg=cfg)
+        local_windows = build_local_windows(self._storage, entity_matches, chunk_matches)
 
         # Merge and format for prompt
         context_windows = global_windows + local_windows
@@ -852,8 +839,8 @@ class PathRAG:
         prompt = RAG_PROMPT.format(context=context_block, question=question)
         answer = await self._chat.generate(
             prompt,
-            max_tokens=cfg.llm_max_tokens,
-            temperature=cfg.llm_temperature,
+            max_tokens=settings.retrieval.llm_max_tokens,
+            temperature=settings.retrieval.llm_temperature,
         )
         return RetrievalResult(
             answer=answer,
@@ -878,7 +865,6 @@ class PathRAG:
 
 __all__ = [
     "PathRAG",
-    "RetrieverConfig",
     "StorageAdapter",
     "StoragePaths",
     "EntityMatch",
@@ -887,3 +873,4 @@ __all__ = [
     "ContextWindow",
     "RetrievalResult",
 ]
+

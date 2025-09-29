@@ -2,25 +2,20 @@
 from __future__ import annotations
 import os
 import sqlite3
+import json, hashlib
 from typing import Dict, Any, Iterable, List, Optional, Sequence, Tuple
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import replace
 from dotenv import load_dotenv
-from openai import AzureOpenAI
-import chromadb
+from openai import OpenAI, AzureOpenAI
+from llm import Embedder
+import chromadb  
 
-load_dotenv()
-
+from settings import settings, StoragePaths as SettingsStoragePaths
 
 # ---------------------------
 # Helpers
 # ---------------------------
-
-def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(name)
-    return v if v is not None else default
-
-
 def _ensure_dir_for(path: str) -> None:
     d = os.path.dirname(os.path.abspath(path))
     if d and not os.path.exists(d):
@@ -31,47 +26,39 @@ def _normalize_pair(a: str, b: str) -> Tuple[str, str]:
     """Return a canonical ordering for an undirected pair."""
     return (a, b) if a <= b else (b, a)
 
-
-# ---------------------------
-# ---------------------------
-# Embeddings
-# ---------------------------
-
-class AzureEmbedder:
+def _current_models_fingerprint(embedder) -> dict:
     """
-    Thin wrapper around Azure OpenAI embeddings.
-    Expects environment variables:
-      - AZURE_OPENAI_ENDPOINT
-      - AZURE_OPENAI_API_KEY
-      - AZURE_OPENAI_API_VERSION (optional, default '2024-02-15-preview')
-      - AZURE_OPENAI_EMB_DEPLOYMENT_NAME  (embedding deployment name)
+    Build a stable fingerprint for both the embedding model and the chat model.
+    Stored on each Chroma collection so we can verify at open time.
     """
-    def __init__(self):
-        if AzureOpenAI is None:  # type: ignore[truthy-bool]
-            raise RuntimeError("openai package not installed. pip install openai")
-        endpoint = _get_env("AZURE_OPENAI_ENDPOINT")
-        api_key = _get_env("AZURE_OPENAI_API_KEY")
-        api_version = _get_env("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-        if not endpoint or not api_key:
-            raise RuntimeError("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY")
-        self.model = _get_env("AZURE_OPENAI_EMB_DEPLOYMENT_NAME")
-        if not self.model:
-            raise RuntimeError("Set AZURE_OPENAI_EMB_DEPLOYMENT_NAME to your embeddings deployment name")
-        self.client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=endpoint)
+    prov = settings.provider.provider  # "openai" | "azure"
 
-    def embed_texts(self, texts: Iterable[str], batch_size: int = 64) -> List[List[float]]:
-        out: List[List[float]] = []
-        batch: List[str] = []
-        for t in texts:
-            batch.append(t)
-            if len(batch) >= batch_size:
-                resp = self.client.embeddings.create(input=batch, model=self.model)  # type: ignore[attr-defined]
-                out.extend([d.embedding for d in resp.data])
-                batch = []
-        if batch:
-            resp = self.client.embeddings.create(input=batch, model=self.model)  # type: ignore[attr-defined]
-            out.extend([d.embedding for d in resp.data])
-        return out
+    if prov == "openai":
+        emb_model = settings.provider.openai_embeddings_model
+        llm_model = settings.provider.openai_llm_model
+        endpoint = settings.provider.openai_base_url or "https://api.openai.com/v1"
+        api_version = ""  # not applicable
+    else:
+        emb_model = settings.provider.azure_embeddings_deployment
+        llm_model = settings.provider.azure_llm_deployment
+        endpoint = settings.provider.azure_endpoint
+        api_version = settings.provider.azure_api_version
+
+    fp = {
+        "provider": prov,
+        "embedding_model": emb_model,
+        "embedding_dim": embedder.dimension,
+        "llm_model": llm_model,
+        "endpoint": endpoint,
+        "api_version": api_version,
+    }
+    fp_json = json.dumps(fp, sort_keys=True)
+    fp_sha = hashlib.sha256(fp_json.encode("utf-8")).hexdigest()
+    fp["sha256"] = fp_sha
+    fp["json"] = fp_json
+    return fp
+
+# ---------------------------
 
 
 # ---------------------------
@@ -98,6 +85,7 @@ class DocumentsDB:
             "language",
             "full_text",
             "full_char_count",
+            "content_hash",
         ]
 
     @contextmanager
@@ -125,7 +113,17 @@ class DocumentsDB:
                 mime_type TEXT,
                 language TEXT,
                 full_text TEXT,
-                full_char_count INTEGER
+                full_char_count INTEGER,
+                content_hash TEXT
+            );''')
+            cur.execute('''
+            CREATE TABLE IF NOT EXISTS llm_cache (
+                model      TEXT NOT NULL,
+                prompt_sha TEXT NOT NULL,
+                text_sha   TEXT NOT NULL,
+                created    REAL NOT NULL,
+                result     TEXT NOT NULL,
+                PRIMARY KEY (model, prompt_sha, text_sha)
             );''')
             con.commit()
 
@@ -149,12 +147,13 @@ class DocumentsDB:
             metadata.get("language"),
             full_text,
             metadata.get("full_char_count", len(full_text) if full_text else 0),
+            metadata.get("content_hash"),
         )
         with self.connect() as con:
             con.execute('''
                 INSERT OR IGNORE INTO documents
-                (doc_id, filename, filepath, file_size, last_modified, created, extension, mime_type, language, full_text, full_char_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                (doc_id, filename, filepath, file_size, last_modified, created, extension, mime_type, language, full_text, full_char_count, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             ''', row)
             con.commit()
 
@@ -170,11 +169,12 @@ class DocumentsDB:
     def get_document_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
         with self.connect() as con:
             cur = con.cursor()
-            cur.execute("SELECT * FROM documents WHERE filename = ?;", (filename,))
+            cur.execute(
+                "SELECT * FROM documents WHERE filename = ? ORDER BY created DESC LIMIT 1;",
+                (filename,)
+            )
             row = cur.fetchone()
-            if row:
-                return dict(zip(self.KEYS, row))
-            return None
+            return dict(zip(self.KEYS, row)) if row else None
         
     def list_documents(self) -> List[Dict[str, Any]]:
         with self.connect() as con:
@@ -207,6 +207,33 @@ class DocumentsDB:
         set_clause = ", ".join(set_clauses)
         with self.connect() as con:
             con.execute(f"UPDATE documents SET {set_clause} WHERE doc_id = ?;", values)
+            con.commit()
+
+    def get_llm_cache(self, model: str, prompt_sha: str, text_sha: str, max_age_hours: int) -> Optional[str]:
+        """Return cached raw LLM result or None if not found / expired / invalid JSON."""
+        import time
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT result, created FROM llm_cache WHERE model=? AND prompt_sha=? AND text_sha=?;",
+                (model, prompt_sha, text_sha)
+            ).fetchone()
+        if not row:
+            return None
+        result, created = row
+        # TTL check
+        age_h = (time.time() - float(created)) / 3600.0
+        if age_h > float(max_age_hours):
+            return None
+        return result
+
+    def put_llm_cache(self, model: str, prompt_sha: str, text_sha: str, result: str) -> None:
+        """Insert or replace a cached raw LLM result (idempotent)."""
+        import time
+        with self.connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO llm_cache (model, prompt_sha, text_sha, created, result) VALUES (?, ?, ?, ?, ?);",
+                (model, prompt_sha, text_sha, time.time(), result)
+            )
             con.commit()
 
 class ChunksDB:
@@ -367,7 +394,7 @@ class ChunksDB:
 class GraphDB:
     """
     Separate SQLite database for the knowledge graph schema (nodes & edges).
-    - Nodes unique on (name, type)
+    - Nodes unique on name
     - Edges unique on undirected pair (source_name, target_name), stored canonically as (u_source_name, u_target_name)
     """
     def __init__(self, db_path: str = "graph.sqlite"):
@@ -395,7 +422,7 @@ class GraphDB:
                 description TEXT,
                 source_id TEXT,
                 filepath TEXT,
-                UNIQUE(name, type)
+                UNIQUE(name)
             );''')
 
             # Store canonicalized pair to enforce undirected uniqueness
@@ -435,58 +462,62 @@ class GraphDB:
             ''', [(n['name'], n['type'], n.get('description'), n.get('source_id'), n.get('filepath')) for n in nodes])
             con.commit()
 
-    def get_node(self, name: str, type: str) -> Optional[Dict[str, Any]]:
+    def get_node(self, name: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch exactly one node by name.
+        Returns a dict with: name, type, description, source_id, filepath — or None if missing.
+        """
         keys = [k for k in self.KEYS_NODE if k != "id"]
         with self.connect() as con:
             cur = con.cursor()
             cur.execute('''
-                SELECT name, type, description, source_id, filepath FROM nodes WHERE name = ? AND type = ?;
-            ''', (name, type))
+                SELECT name, type, description, source_id, filepath
+                FROM nodes
+                WHERE name = ?;
+            ''', (name,))
             row = cur.fetchone()
-            if row:
-                return dict(zip(keys, row))
-            return None
+        return dict(zip(keys, row)) if row else None
 
-    def get_nodes(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
-        if not names or not types or len(names) != len(types):
+
+    def get_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
+        if not names:
             return []
         keys = [k for k in self.KEYS_NODE if k != "id"]
-        pairs = list(zip(names, types))
-        placeholders = ",".join(["(?, ?)"] * len(pairs))
-        flat_params: List[Any] = []
-        for n, t in pairs:
-            flat_params.extend([n, t])
+        placeholders = ",".join(["?"] * len(names))
         with self.connect() as con:
             cur = con.cursor()
             cur.execute(f'''
                 SELECT name, type, description, source_id, filepath
                 FROM nodes
-                WHERE (name, type) IN ({placeholders});
-            ''', tuple(flat_params))
+                WHERE name IN ({placeholders});
+            ''', tuple(names))
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
 
-    def delete_node(self, name: str, type: str) -> None:
+    def delete_node(self, name: str) -> None:
+        """
+        Delete exactly one node identified by name.
+        """
         with self.connect() as con:
-            con.execute('''
-                DELETE FROM nodes WHERE name = ? AND type = ?;
-            ''', (name, type))
+            con.execute('DELETE FROM nodes WHERE name = ?;', (name,))
             con.commit()
 
-    def delete_nodes(self, names: List[str], types: List[str]) -> None:
-        if not names or not types or len(names) != len(types):
+
+    def delete_nodes(self, names: List[str]) -> None:
+        """
+        Bulk delete by name.
+        """
+        if not names:
             return
-        pairs = list(zip(names, types))
         with self.connect() as con:
-            con.executemany('''
-                DELETE FROM nodes WHERE name = ? AND type = ?;
-            ''', pairs)
+            con.executemany('DELETE FROM nodes WHERE name = ?;', [(n,) for n in names])
             con.commit()
 
-    def update_node(self, name: str, type: str, updates: Dict[str, Any]) -> None:
+
+    def update_node(self, name: str, updates: Dict[str, Any]) -> None:
         if not updates:
             return
-        allowed_keys = {"description", "source_id", "filepath"}
+        allowed_keys = {"type", "description", "source_id", "filepath"}
         set_clauses = []
         values = []
         for k, v in updates.items():
@@ -496,21 +527,20 @@ class GraphDB:
         if not set_clauses:
             return
         values.append(name)
-        values.append(type)
         set_clause = ", ".join(set_clauses)
         with self.connect() as con:
-            con.execute(f"UPDATE nodes SET {set_clause} WHERE name = ? AND type = ?;", values)
+            con.execute(f"UPDATE nodes SET {set_clause} WHERE name = ?;", values)
             con.commit()
 
     def update_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
         if not updates_list:
             return
         for update in updates_list:
-            self.update_node(update["name"], update["type"], update)
+            self.update_node(update["name"], update)
 
     # ---------------------------
     # EDGE OPERATIONS
-    # ---------------------------    
+    # ---------------------------
     def add_edge(self, source_name: str, target_name: str, weight: Optional[float] = None,
                  description: Optional[str] = None, keywords: Optional[str] = None,
                  source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
@@ -626,32 +656,123 @@ class GraphDB:
 # ---------------------------
 
 class _ChromaBase:
-    def __init__(self, collection: str, chroma_dir: str, embedder: Optional[AzureEmbedder] = None):
+    def __init__(self, collection: str, chroma_dir: str, embedder: Optional[Embedder] = None):
         if chromadb is None:
-            raise RuntimeError("chromadb not installed. pip install chromadb")
+            if _CHROMADB_IMPORT_ERROR is not None:
+                raise RuntimeError(
+                    "chromadb is required for vector storage. Install it with `pip install chromadb`."
+                ) from _CHROMADB_IMPORT_ERROR
+            raise RuntimeError("chromadb is required for vector storage. Install it with `pip install chromadb`.")
+
         _ensure_dir_for(os.path.join(chroma_dir, ".sentinel"))
         self.client = chromadb.PersistentClient(path=chroma_dir)  # type: ignore
-        self.col = self.client.get_or_create_collection(name=collection, metadata={"hnsw:space": "cosine"})
-        self.embedder = embedder or AzureEmbedder()
+        self.col = self.client.get_or_create_collection(
+            name=collection,
+            metadata={"hnsw:space": "cosine"}  # keep existing setting
+        )
+
+        self.embedder = embedder or Embedder()
+
+        # Verify or attach fingerprint
+        self._verify_or_attach_fingerprint()
+
+    def _verify_or_attach_fingerprint(self) -> None:
+        fp = _current_models_fingerprint(self.embedder)
+        meta = dict(self.col.metadata or {})
+
+        stored_json = meta.get("fingerprint_json")
+        stored_sha  = meta.get("fingerprint_sha")
+
+        # First time (no fingerprint): try to attach it
+        if not stored_json or not stored_sha:
+            new_meta = {**meta, "fingerprint_json": fp["json"], "fingerprint_sha": fp["sha256"]}
+            try:
+                # chroma>=0.4 supports modify(); if not, recreate with metadata
+                if hasattr(self.col, "modify"):
+                    self.col.modify(metadata=new_meta)  # type: ignore[attr-defined]
+                else:
+                    # If modify() isn't available, recreate to persist metadata
+                    name = self.col.name
+                    self.client.delete_collection(name)
+                    self.col = self.client.get_or_create_collection(name=name, metadata=new_meta)
+            except Exception:
+                # Non-fatal: if we cannot write metadata, we still proceed *this time*,
+                # but note that subsequent runs may not detect mismatches.
+                pass
+            return
+
+        # Compare with stored
+        try:
+            prev = json.loads(stored_json)
+        except Exception:
+            prev = {}
+
+        mismatches = []
+        for k in ("provider", "embedding_model", "embedding_dim", "llm_model"):
+            if prev.get(k) != fp.get(k):
+                mismatches.append((k, prev.get(k), fp.get(k)))
+
+        if mismatches:
+            # Suggest exact .env keys the user should set to match the stored DB
+            suggestions = []
+            if settings.provider.provider == "openai":
+                for k, old, _ in mismatches:
+                    if k == "embedding_model" and old:
+                        suggestions.append(f"OPENAI_EMBEDDINGS_MODEL={old}")
+                    if k == "llm_model" and old:
+                        suggestions.append(f"OPENAI_LLM_MODEL={old}")
+            else:
+                for k, old, _ in mismatches:
+                    if k == "embedding_model" and old:
+                        suggestions.append(f"AZURE_OPENAI_EMB_DEPLOYMENT_NAME={old}")
+                    if k == "llm_model" and old:
+                        suggestions.append(f"AZURE_OPENAI_LLM_DEPLOYMENT_NAME={old}")
+
+            lines = "\n".join(f"  - {k}: stored='{old}' vs now='{new}'" for k, old, new in mismatches)
+            hint = "\n".join(f"* {s}" for s in suggestions) or "(adjust your settings to match the stored values)"
+
+            raise RuntimeError(
+                f"[Model mismatch] Chroma collection '{self.col.name}' at '{self._chroma_dir}' was built with different models.\n"
+                f"{lines}\n\n"
+                f"To use this existing database, set in your .env:\n{hint}\n\n"
+                f"Or delete/rebuild the collection directory to regenerate vectors."
+            )
 
     def _add(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]):
+        metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]
         embeddings = self.embedder.embed_texts(texts)
         self.col.add(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def _get(self, ids: List[str]) -> List[Dict[str, Any]]:
-        return self.col.get(ids=ids)
+        res = self.col.get(ids=ids, include=["documents", "metadatas"])
+        return self.to_list(res)
 
     def _delete(self, ids: List[str]) -> None:
         self.col.delete(ids=ids)
 
     def _upsert(self, ids: List[str], texts: List[str], metadatas: List[Dict[str, Any]]) -> None:
+        metadatas = [{k: v if v is not None else "" for k, v in m.items()} for m in metadatas]
         embeddings = self.embedder.embed_texts(texts)
         self.col.upsert(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def _query(self, texts: List[str], n_results: int, where: Optional[Dict[str, Any]] = None,
                where_document: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         embeddings = self.embedder.embed_texts(texts)
-        return self.col.query(embeddings=embeddings, n_results=n_results, where=where, where_document=where_document)
+        res = self.col.query(query_embeddings=embeddings, n_results=n_results, where=where,
+                             where_document=where_document, include=["documents", "metadatas", "distances"])
+        return self.to_list(res)
+
+    @staticmethod
+    def to_list(results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not results:
+            return []
+        
+        num_items = len(next(iter(results.values())))
+        return [
+            {key: values[i] if isinstance(values, list) else values for key, values in results.items()}
+            for i in range(num_items)
+        ]
+
 
 class ChunkVectors(_ChromaBase):
     """
@@ -698,13 +819,20 @@ class ChunkVectors(_ChromaBase):
 class EntityVectors(_ChromaBase):
     """
     Vector DB for entities.
-    Uniqueness: (name, type) -> id "name::type"
+    Uniqueness: name -> id "name"
     metadatas:
       - name, type, description, source_id, filepath
     """
+
     @staticmethod
-    def _entity_id(name: str, type: str) -> str:
-        return f"{name}::{type}"
+    def _embed_text(name: str, etype: str, description: str) -> str:
+        type_part = f"[{etype}]" if etype else ""
+        parts = [name]
+        if type_part:
+            parts.append(type_part)
+        if description:
+            parts.append(description)
+        return " ".join(parts).strip()
 
     def add_entities(self, entities: Sequence[Dict[str, Any]]) -> None:
         ids: List[str] = []
@@ -712,11 +840,10 @@ class EntityVectors(_ChromaBase):
         metas: List[Dict[str, Any]] = []
         for e in entities:
             name = e["name"]
-            etype = e["type"]
+            etype = e.get("type", "") or ""
             desc = e.get("description", "") or ""
-            ids.append(self._entity_id(name, etype))
-            # Embed name + type + description
-            texts.append(f"{name} [{etype}] {desc}")
+            ids.append(name)
+            texts.append(self._embed_text(name, etype, desc))
             metas.append({
                 "name": name,
                 "type": etype,
@@ -726,13 +853,11 @@ class EntityVectors(_ChromaBase):
             })
         self._add(ids, texts, metas)
 
-    def get_entities(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
-        ids = [self._entity_id(name, etype) for name, etype in zip(names, types)]
-        return self._get(ids=ids)
-    
-    def delete_entities(self, names: List[str], types: List[str]) -> None:
-        ids = [self._entity_id(name, etype) for name, etype in zip(names, types)]
-        self._delete(ids=ids)
+    def get_entities(self, names: List[str]) -> List[Dict[str, Any]]:
+        return self._get(ids=names)
+
+    def delete_entities(self, names: List[str]) -> None:
+        self._delete(ids=names)
 
     def upsert_entities(self, entities: Sequence[Dict[str, Any]]) -> None:
         ids: List[str] = []
@@ -740,11 +865,10 @@ class EntityVectors(_ChromaBase):
         metas: List[Dict[str, Any]] = []
         for e in entities:
             name = e["name"]
-            etype = e["type"]
+            etype = e.get("type", "") or ""
             desc = e.get("description", "") or ""
-            ids.append(self._entity_id(name, etype))
-            # Embed name + type + description
-            texts.append(f"{name} [{etype}] {desc}")
+            ids.append(name)
+            texts.append(self._embed_text(name, etype, desc))
             metas.append({
                 "name": name,
                 "type": etype,
@@ -832,14 +956,8 @@ class RelationVectors(_ChromaBase):
 # Unified Storage Facade
 # ---------------------------
 
-@dataclass
-class StoragePaths:
-    documents_db: str = "./storage/documents.sqlite"
-    chunks_db: str = "./storage/chunks.sqlite"
-    graph_db: str = "./storage/graph.sqlite"
-    chroma_chunks: str = "./storage/chroma_chunks"
-    chroma_entities: str = "./storage/chroma_entities"
-    chroma_relations: str = "./storage/chroma_relations"
+# Re-export the unified StoragePaths dataclass from graph.settings for compatibility.
+StoragePaths = SettingsStoragePaths
 
 
 class Storage:
@@ -855,24 +973,34 @@ class Storage:
     Only 'add' operations are implemented for now.
     """
 
-    def __init__(self, paths: Optional[StoragePaths] = None, embedder: Optional[AzureEmbedder] = None):
-        paths = paths or StoragePaths()
+    def __init__(self, paths: Optional[StoragePaths] = None, embedder: Optional[Embedder] = None):
+        if paths is None:
+            paths = replace(settings.storage)
 
         # Schema DBs
         self.documents = DocumentsDB(paths.documents_db)
         self.chunks = ChunksDB(paths.chunks_db)
         self.graph = GraphDB(paths.graph_db)
 
-        # Vector DBs (each in its own persistent directory => separate DBs)
-        self.chunk_vectors = ChunkVectors(collection="chunks", chroma_dir=paths.chroma_chunks, embedder=embedder)
-        self.entity_vectors = EntityVectors(collection="entities", chroma_dir=paths.chroma_entities, embedder=embedder)
-        self.relation_vectors = RelationVectors(collection="relations", chroma_dir=paths.chroma_relations, embedder=embedder)
+        # Embedder (shared)
+        self.embedder = embedder or Embedder()
+
+        # Vector DBs (each in its own persistent directory => separate DBs) but same embedder.
+        self.chunk_vectors = ChunkVectors(collection="chunks", chroma_dir=paths.chroma_chunks, embedder=self.embedder)
+        self.entity_vectors = EntityVectors(collection="entities", chroma_dir=paths.chroma_entities, embedder=self.embedder)
+        self.relation_vectors = RelationVectors(collection="relations", chroma_dir=paths.chroma_relations, embedder=self.embedder)
 
     def init(self):
         """Create tables/collections if they don't exist yet."""
         self.documents.init()
         self.chunks.init()
         self.graph.init()
+
+    def get_llm_cache(self, model: str, prompt_sha: str, text_sha: str, max_age_hours: int) -> Optional[str]:
+        return self.documents.get_llm_cache(model, prompt_sha, text_sha, max_age_hours)
+
+    def put_llm_cache(self, model: str, prompt_sha: str, text_sha: str, result: str) -> None:
+        self.documents.put_llm_cache(model, prompt_sha, text_sha, result)
 
     # ---------- Add-only APIs ----------
 
@@ -885,15 +1013,11 @@ class Storage:
         self.chunks.add_chunks(chunks)
 
     # 3) Knowledge Graph schema
-    def add_kg_node(self, name: str, type: str, description: Optional[str] = None,
-                    source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
-        self.graph.add_node(name=name, type=type, description=description, source_id=source_id, filepath=filepath)
+    def add_kg_nodes(self, nodes: List[Dict[str, Any]]) -> None:
+        self.graph.add_nodes(nodes)
 
-    def add_kg_edge(self, source_name: str, target_name: str, weight: Optional[float] = None,
-                    description: Optional[str] = None, keywords: Optional[str] = None,
-                    source_id: Optional[str] = None, filepath: Optional[str] = None) -> None:
-        self.graph.add_edge(source_name=source_name, target_name=target_name, weight=weight,
-                            description=description, keywords=keywords, source_id=source_id, filepath=filepath)
+    def add_kg_edges(self, edges: List[Dict[str, Any]]) -> None:
+        self.graph.add_edges(edges)
 
     # 4) Chunk vectors
     def add_chunk_vectors(self, chunks: Sequence[Dict[str, Any]]) -> None:
@@ -904,7 +1028,7 @@ class Storage:
     def add_entity_vectors(self, entities: Sequence[Dict[str, Any]]) -> None:
         """
         Each entity dict must include: name, type; optional: description, source_id, filepath
-        Uniqueness enforced via Chroma IDs "name::type".
+        Uniqueness enforced via entity name.
         """
         if entities:
             self.entity_vectors.add_entities(entities)
@@ -938,32 +1062,42 @@ class Storage:
     def get_chunks_by_filename(self, filename: str) -> List[Dict[str, Any]]:
         return self.chunks.get_chunks_by_filename(filename)
 
-    def get_chunk_by_uuid(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
+    def get_chunk_by_uuid(self, chunk_uuid: str) -> List[Dict[str, Any]]:
         return self.chunks.get_chunk_by_uuid(chunk_uuid)
 
     def get_chunks_by_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
         return self.chunks.get_chunks_by_uuids(chunk_uuids)
     
     # 3) Graph
-    def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
-        return self.graph.get_node(node_id)
-    
-    def get_nodes(self, node_ids: List[str]) -> List[Dict[str, Any]]:
-        return self.graph.get_nodes(node_ids)
+    def get_node(self, name: str) -> Optional[Dict[str, Any]]:
+        """
+        Pass-through: fetch one graph node by name.
+        """
+        return self.graph.get_node(name)
 
-    def get_edge(self, edge_id: str) -> Optional[Dict[str, Any]]:
-        return self.graph.get_edge(edge_id)
+    def get_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
+        return self.graph.get_nodes(names)
 
-    def get_edges(self, edge_ids: List[str]) -> List[Dict[str, Any]]:
-        return self.graph.get_edges(edge_ids)
+    def get_edge(self, source_name: str, target_name: str) -> Optional[Dict[str, Any]]:
+        return self.graph.get_edge(source_name, target_name)
+
+    def get_edges(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+        return self.graph.get_edges(pairs)
 
     # 4) Chunk Vectors
     def get_chunk_vector(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
         return self.chunk_vectors.get([chunk_uuid])
 
     # 5) Entity Vectors
-    def get_entities(self, names: List[str], types: List[str]) -> List[Dict[str, Any]]:
-        return self.entity_vectors.get_entities(names, types)
+    def get_entities(self, names: List[str]) -> List[Dict[str, Any]]:
+        """
+        Retrieve entity vectors by name.
+        Returns a list of results (each with 'ids', 'documents', 'metadatas', 'distances' if available).
+        """
+        if not names:
+            return []
+        return self.entity_vectors.get_entities(names)
+
 
     # 6) Relation Vectors
     def get_relations(self, pairs: List[Tuple[str, str]]) -> Optional[Dict[str, Any]]:
@@ -986,11 +1120,17 @@ class Storage:
         self.chunks.delete_chunks_by_uuids(chunk_uuids)
 
     # 3) Graph
-    def delete_node(self, name: str, type: str) -> None:
-        self.graph.delete_node(name, type)
+    def delete_node(self, name: str) -> None:
+        """
+        Pass-through: delete one graph node by name.
+        """
+        self.graph.delete_node(name)
 
-    def delete_nodes(self, names: List[str], types: List[str]) -> None:
-        self.graph.delete_nodes(names, types)
+    def delete_nodes(self, names: List[str]) -> None:
+        """
+        Pass-through: bulk delete graph nodes by name.
+        """
+        self.graph.delete_nodes(names)
 
     def delete_edge(self, source_name: str, target_name: str) -> None:
         self.graph.delete_edge(source_name, target_name)
@@ -1003,8 +1143,13 @@ class Storage:
         self.chunk_vectors.delete([chunk_uuid])
 
     # 5) Entity Vectors
-    def delete_entity_vector(self, names: List[str], types: List[str]) -> None:
-        self.entity_vectors.delete_entities(names, types)
+    def delete_entity_vector(self, names: List[str]) -> None:
+        """
+        Delete entity vectors by name.
+        """
+        if not names:
+            return
+        self.entity_vectors.delete_entities(names)
 
     # 6) Relation Vectors
     def delete_relation_vector(self, pairs: List[Tuple[str, str]]) -> None:
@@ -1021,17 +1166,56 @@ class Storage:
         self.chunks.update_chunk(chunk_uuid, updates)
 
     # 3) Graph
-    def upsert_node(self, node_id: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_node(node_id, updates)
+    def upsert_node(self, name: str, updates: Dict[str, Any]) -> None:
+        self.graph.update_node(name, updates)
 
     def upsert_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
-        self.graph.update_nodes(updates_list)
+        """
+        Split incoming rows into adds vs updates based on existing node names.
+        """
+        to_add: List[Dict[str, Any]] = []
+        to_update: List[Dict[str, Any]] = []
+        if not updates_list:
+            return
+        # Bulk fetch all names once, then test membership
+        names = sorted({u["name"] for u in updates_list})
+        existing = self.graph.get_nodes(names) if names else []
+        existing_names = {row["name"] for row in existing}
+        for upd in updates_list:
+            name = upd.get("name")
+            if not name:
+                continue
+            if name in existing_names:
+                to_update.append(upd)
+            else:
+                to_add.append({
+                    "name": name,
+                    "type": (upd.get("type") or "unknown"),
+                    "description": (upd.get("description") or ""),
+                    "source_id": (upd.get("source_id") or ""),
+                    "filepath": (upd.get("filepath") or ""),
+                })
+        if to_add:
+            self.graph.add_nodes(to_add)
+        if to_update:
+            self.graph.update_nodes(to_update)
 
-    def upsert_edge(self, edge_id: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_edge(edge_id, updates)
+    def upsert_edge(self, source_name: str, target_name: str, updates: Dict[str, Any]) -> None:
+        self.graph.update_edge(source_name, target_name, updates)
 
     def upsert_edges(self, updates_list: List[Dict[str, Any]]) -> None:
-        self.graph.update_edges(updates_list)
+        to_add = []
+        to_update = []
+        for upd in updates_list:
+            existing = self.graph.get_edge(upd["source_name"], upd["target_name"])
+            if existing is None:
+                to_add.append(upd)
+            else:
+                to_update.append(upd)
+        if to_add:
+            self.graph.add_edges(to_add)
+        if to_update:
+            self.graph.update_edges(to_update)
 
     # 4) Chunk Vectors
     def upsert_chunk_vector(self, chunks: Sequence[Dict[str, Any]]) -> None:

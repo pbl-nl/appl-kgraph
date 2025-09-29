@@ -1,90 +1,23 @@
 from __future__ import annotations
 
-import os
 import re
 import json
 from dataclasses import dataclass
-from dotenv import load_dotenv
+from prompts import PROMPTS
+from llm import Chat
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-load_dotenv()
-# ─────────────────────────────────────────────────────────────
-# Load prompt templates from your uploaded prompts.py
-# ─────────────────────────────────────────────────────────────
-try:
-    from prompts import PROMPTS  # type: ignore
-except Exception as e:  # pragma: no cover
-    raise RuntimeError("Could not import PROMPTS from prompts.py. Place prompts.py next to this script.") from e
+from settings import settings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from storage import Storage
+import hashlib
 
 # ─────────────────────────────────────────────────────────────
-# Azure OpenAI chat client (env-driven)
-#   Required env vars:
-#     - AZURE_OPENAI_ENDPOINT
-#     - AZURE_OPENAI_API_KEY
-#     - AZURE_OPENAI_CHAT_DEPLOYMENT_NAME   (the chat model deployment name)
-#     - AZURE_OPENAI_API_VERSION            (optional, defaults to 2024-02-15-preview)
+# Helpers
 # ─────────────────────────────────────────────────────────────
-try:
-    from openai import AzureOpenAI  # type: ignore
-except Exception:
-    AzureOpenAI = None  # type: ignore
 
-
-@dataclass
-class AzureConfig:
-    endpoint: str
-    api_key: str
-    api_version: str = "2024-02-15-preview"
-    chat_deployment: Optional[str] = None  # AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
-
-
-class AzureChat:
-    def __init__(self, cfg: Optional[AzureConfig] = None):
-        if AzureOpenAI is None:
-            raise RuntimeError("openai package not installed. pip install openai")
-
-        if cfg is None:
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            api_version = os.getenv("AZURE_OPENAI_API_VERSION")
-            chat_deployment = os.getenv("AZURE_OPENAI_LLM_DEPLOYMENT_NAME")
-            if not endpoint or not api_key or not chat_deployment:
-                raise RuntimeError(
-                    "Missing Azure env vars. Set AZURE_OPENAI_ENDPOINT, "
-                    "AZURE_OPENAI_API_KEY, AZURE_OPENAI_LLM_DEPLOYMENT_NAME"
-                )
-            cfg = AzureConfig(
-                endpoint=endpoint,
-                api_key=api_key,
-                api_version=api_version,
-                chat_deployment=chat_deployment,
-            )
-        self.cfg = cfg
-        self.client = AzureOpenAI(
-            api_key=cfg.api_key,
-            api_version=cfg.api_version,
-            azure_endpoint=cfg.endpoint,
-        )
-
-    def generate(
-        self,
-        prompt: str,
-        system: Optional[str] = None,
-        temperature: float = 0.1,
-        max_tokens: int = 2048,
-    ) -> str:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        resp = self.client.chat.completions.create(
-            model=self.cfg.chat_deployment,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content or ""
-
+def _sha256(s: str) -> str:
+    """Helper to compute SHA-256 hash for prompt/document caching keys."""
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 # ─────────────────────────────────────────────────────────────
 # Prompt Builder
@@ -96,21 +29,28 @@ def build_entity_relation_prompt(
     entity_types: Optional[Iterable[str]] = None,
 ) -> str:
     """
-    Fill PROMPTS['entity_extraction'] for a single chunk of text, using your examples and delimiters.
+    Fill PROMPTS['entity_extraction'] with correct delimiters, language, examples, entity types to be used per chunk of text. Also formats the
+    examples so they DO NOT contain literals such as '{record_delimiter}'.
     """
-    examples = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
+    # 1) Base context for the prompt (without examples yet)
+    examples_template = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
     ctx = dict(
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         record_delimiter=PROMPTS["DEFAULT_RECORD_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
         entity_types=", ".join(entity_types) if entity_types else ", ".join(PROMPTS["DEFAULT_ENTITY_TYPES"]),
-        examples=examples,
+        examples="",
         language=language or PROMPTS["DEFAULT_LANGUAGE"],
         input_text=text,
     )
+
+    # 2) Join & format the examples with the SAME ctx so placeholders are replaced
+    examples = examples_template.format(**ctx)  # fill in delimiters, entity_types, language
+    ctx["examples"] = examples
+
+    # 3) Finally format the main template (including the filled examples)
     template = PROMPTS["entity_extraction"]
     return template.format(**ctx)
-
 
 # ─────────────────────────────────────────────────────────────
 # Parsing utilities (regex + delimiter tolerant)
@@ -174,6 +114,9 @@ def parse_model_output(
       ("entity"<|>"name"<|>"type"<|>"description")
       ("relationship"<|>"source"<|>"target"<|>"description"<|>"keywords"<|>"strength")
       ("content_keywords"<|>"kw1, kw2, ...")
+
+    Tolerates both real delimiters and accidental literal
+    '{record_delimiter}' / '{tuple_delimiter}' tokens from the model.
     """
     tuple_delim = tuple_delim or PROMPTS["DEFAULT_TUPLE_DELIMITER"]
     record_delim = record_delim or PROMPTS["DEFAULT_RECORD_DELIMITER"]
@@ -181,11 +124,17 @@ def parse_model_output(
 
     raw = _normalize_quotes(raw)
 
+    # Defensive: handles examples that slipped through or model echoes
+    raw = raw.replace("{tuple_delimiter}", tuple_delim) \
+             .replace("{record_delimiter}", record_delim) \
+             .replace("{completion_delimiter}", completion_delim)
+    
+
     # Truncate at completion delimiter if present
     if completion_delim in raw:
         raw = raw.split(completion_delim, 1)[0]
 
-    # Some models echo headings, keep only after "Output:" if present
+    # Some models may echo headings, keep only after "Output:" if present
     if "Output:" in raw:
         raw = raw.split("Output:", 1)[1]
 
@@ -216,8 +165,9 @@ def parse_model_output(
             })
 
         elif tag == "relationship" and len(parts) >= 6:
-            # ("relationship", source, target, description, keywords, strength)
-            src, tgt, desc, keywords, strength = parts[1], parts[2], parts[3], parts[4], parts[5]
+            # Supported formats:
+            # 6-tuple: ("relationship", source_name, target_name, description, keywords, strength)
+            _, src, tgt, desc, keywords, strength = parts[:6]
             relationships.append({
                 "source_name": src,
                 "target_name": tgt,
@@ -242,7 +192,6 @@ def parse_model_output(
         raw_records=recs,
     )
 
-
 # ─────────────────────────────────────────────────────────────
 # Public extraction API (chunk-by-chunk + batch)
 # ─────────────────────────────────────────────────────────────
@@ -259,10 +208,139 @@ def _require_chunk_uuid(chunk: Dict[str, Any]) -> str:
         raise KeyError("Each chunk MUST include 'chunk_uuid' (used as source_id).")
     return str(chunk["chunk_uuid"])
 
+def extract_from_chunks(
+    chunks: Iterable[Dict[str, Any]],
+    language: Optional[str] = None,
+    entity_types: Optional[Iterable[str]] = None,
+    client: Optional[Chat] = None,
+) -> Dict[str, Any]:
+    """
+    High-level convenience: iterate chunks, call LLM, parse, and return collected results.
+    Returns dict with 'entities', 'relationships', 'content_keywords'.
 
+    PERFORMANCE ENHANCEMENTS:
+    - Reuses a single Chat client (singleton) to keep HTTP sessions hot.
+    - Adds a content-addressed LLM cache in SQLite (model + prompt_sha + text_sha).
+      *Cache stores RAW model text; on hits we parse it exactly like fresh outputs.*
+    - Calls the LLM ONLY for cache misses; hits are stitched back in order.
+    - Runs LLM calls for misses concurrently (bounded by settings-based concurrency).
+
+    SETTINGS (from settings.py):
+    - Concurrency:  settings.perf.max_concurrency       (fallback 6 if missing)
+    - Cache on/off: settings.perf.cache_enabled         (fallback True if missing)
+    - Cache TTL:    settings.perf.cache_max_age_hours   (fallback 720 if missing)
+
+    Provenance:
+    - Even on cache hits, each extracted record is stamped with this file/chunk's
+      source identifiers so cross-file queries remain accurate.
+
+    NOTES:
+    - Prompts are built with `build_entity_relation_prompt(...)`.
+    - Parsing uses `parse_model_output(...)`.
+    - The #TODO you added is preserved below (applied per-chunk after parsing).
+    """
+    # Pull settings
+    MAX_WORKERS = settings.llmperf.max_concurrency
+    CACHE_ENABLED = settings.llmperf.cache_enabled
+    CACHE_MAX_AGE_HOURS = settings.llmperf.cache_max_age_hours
+
+    # 1) Shared LLM client + create Storage facade that connects to SQLite & vector DB
+    chat = client or Chat.singleton()
+    storage: Optional[Storage]
+    try:
+        storage = Storage()
+    except:
+        raise
+    else:
+        storage.init()
+
+    # 2) Materialize chunks to keep stable indexing for stitching results
+    chunk_list: List[Dict[str, Any]] = list(chunks)
+
+    # 3) Build the exact prompts for each chunk
+    #    and compute cache keys (prompt_sha, text_sha) per chunk.
+    prompts: List[str] = []
+    keys: List[Tuple[str, str]] = []  # (prompt_sha, text_sha)
+    for ch in chunk_list:
+        txt = _get_chunk_text(ch)
+        prompt = build_entity_relation_prompt(
+            text=txt,
+            language=language,
+            entity_types=entity_types,
+        )
+        prompts.append(prompt)
+        keys.append((_sha256(prompt), _sha256(txt)))
+
+    # 4) Probe cache; mark misses
+    model_name = chat.model
+    raw_outputs: List[Optional[str]] = [None] * len(chunk_list)
+    to_run: List[int] = []
+
+    if CACHE_ENABLED:
+        for i, (psha, tsha) in enumerate(keys):
+            cached = storage.get_llm_cache(model_name, psha, tsha, CACHE_MAX_AGE_HOURS)
+            if cached is not None:
+                raw_outputs[i] = cached
+            else:
+                to_run.append(i)
+    else:
+        to_run = list(range(len(chunk_list)))
+
+    # 5) Call the LLM ONLY for cache misses, in parallel (bounded)
+    def _call_one(i: int) -> str:
+        return chat.generate(prompt=prompts[i], system="You extract entities and relationships precisely in the required format. Do not add commentary.")
+
+    if to_run:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            futs = {ex.submit(_call_one, i): i for i in to_run}
+            for fut in as_completed(futs):
+                i = futs[fut]
+                out = fut.result()
+                raw_outputs[i] = out
+                if CACHE_ENABLED and storage is not None:
+                    psha, tsha = keys[i]
+                    storage.put_llm_cache(model_name, psha, tsha, out)
+
+    # 6) Parse outputs and attach per-chunk provenance (identical to your approach)
+    all_entities: List[Dict[str, Any]] = []
+    all_relationships: List[Dict[str, Any]] = []
+    all_keywords: List[str] = []
+
+    for i, ch in enumerate(chunk_list):
+        raw = raw_outputs[i] or ""
+        parsed = parse_model_output(raw)   # existing parser
+
+        source_id = _require_chunk_uuid(ch)
+        filepath = ch.get("filepath") or ch.get("filename")
+
+        for e in parsed.entities:
+            e["source_id"] = source_id
+            e["filepath"] = filepath
+        for r in parsed.relationships:
+            r["source_id"] = source_id
+            r["filepath"] = filepath
+
+        # TODO: ask whether the extraction is really completed
+        # If not send with new prompt to complete
+
+        all_entities.extend(parsed.entities)
+        all_relationships.extend(parsed.relationships)
+        all_keywords.extend(parsed.content_keywords)
+
+    return {
+        "entities": all_entities,
+        "relationships": all_relationships,
+        "content_keywords": sorted(set(all_keywords)),
+    }
+
+# ─────────────────────────────────────────────────────────────
+# CLI (optional) — quick test driver
+# ─────────────────────────────────────────────────────────────
+
+# !! Currently not used, but could be useful for single-chunk extraction
 def extract_entities_relations_for_chunk(
     chunk: Dict[str, Any],
-    client: AzureChat,
+    client: Chat,
     language: Optional[str] = None,
     entity_types: Optional[Iterable[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
@@ -291,43 +369,6 @@ def extract_entities_relations_for_chunk(
         r["filepath"] = filepath
 
     return parsed.entities, parsed.relationships, parsed.content_keywords
-
-
-def extract_from_chunks(
-    chunks: Iterable[Dict[str, Any]],
-    language: Optional[str] = None,
-    entity_types: Optional[Iterable[str]] = None,
-    client: Optional[AzureChat] = None,
-) -> Dict[str, Any]:
-    """
-    High-level convenience: iterate chunks, call LLM, parse, and return collected results.
-    Returns dict with 'entities', 'relationships', 'content_keywords'.
-    """
-    if client is None:
-        client = AzureChat()  # read env
-
-    all_entities: List[Dict[str, Any]] = []
-    all_relationships: List[Dict[str, Any]] = []
-    all_keywords: List[str] = []
-
-    for ch in chunks:
-        ents, rels, kws = extract_entities_relations_for_chunk(
-            ch, client=client, language=language, entity_types=entity_types
-        )
-        all_entities.extend(ents)
-        all_relationships.extend(rels)
-        all_keywords.extend(kws)
-
-    return {
-        "entities": all_entities,
-        "relationships": all_relationships,
-        "content_keywords": sorted(set(all_keywords)),
-    }
-
-
-# ─────────────────────────────────────────────────────────────
-# CLI (optional) — quick test driver
-# ─────────────────────────────────────────────────────────────
 
 def _load_chunks_from_path(path: str) -> List[Dict[str, Any]]:
     """
@@ -389,7 +430,7 @@ if __name__ == "__main__":
 
     chunks = _default_demo_chunks() if not args.chunks else _load_chunks_from_path(args.chunks)
 
-    client = AzureChat()  # reads env
+    client = Chat.singleton()
     result = extract_from_chunks(chunks, language=language, entity_types=entity_types, client=client)
 
     # Pretty print

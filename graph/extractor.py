@@ -16,7 +16,15 @@ import hashlib
 # ─────────────────────────────────────────────────────────────
 
 def _sha256(s: str) -> str:
-    """Helper to compute SHA-256 hash for prompt/document caching keys."""
+    """
+    Computes SHA-256 hash of a string for caching keys.
+
+    Args:
+        s (str): The input string to hash.
+
+    Returns:
+        str: The hexadecimal representation of the SHA-256 hash.
+    """
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 # ─────────────────────────────────────────────────────────────
@@ -29,8 +37,20 @@ def build_entity_relation_prompt(
     entity_types: Optional[Iterable[str]] = None,
 ) -> str:
     """
-    Fill PROMPTS['entity_extraction'] with correct delimiters, language, examples, entity types to be used per chunk of text. Also formats the
-    examples so they DO NOT contain literals such as '{record_delimiter}'.
+    Builds a prompt for entity and relationship extraction from text.
+
+    Fills the entity extraction prompt template with appropriate delimiters, language,
+    examples, and entity types. Formats examples to replace placeholder literals.
+
+    Args:
+        text (str): The input text chunk to extract entities and relationships from.
+        language (Optional[str], optional): The output language for extraction.
+            Defaults to the configured default language.
+        entity_types (Optional[Iterable[str]], optional): The types of entities to extract.
+            Defaults to the configured default entity types.
+
+    Returns:
+        str: A formatted prompt ready for LLM consumption.
     """
     # 1) Base context for the prompt (without examples yet)
     examples_template = "\n\n".join(PROMPTS.get("entity_extraction_examples", []))
@@ -70,12 +90,30 @@ _FANCY_QUOTES = {
 }
 
 def _normalize_quotes(s: str) -> str:
+    """
+    Normalizes fancy/smart quotes to standard ASCII quotes.
+
+    Args:
+        s (str): The input string with potential fancy quotes.
+
+    Returns:
+        str: The string with all fancy quotes replaced by standard quotes.
+    """
     for k, v in _FANCY_QUOTES.items():
         s = s.replace(k, v)
     return s
 
 
 def _strip_parens(s: str) -> str:
+    """
+    Removes surrounding parentheses from a string if present.
+
+    Args:
+        s (str): The input string.
+
+    Returns:
+        str: The string with outer parentheses removed, or the original string if no parentheses.
+    """
     s = s.strip()
     if s.startswith("(") and s.endswith(")"):
         return s[1:-1].strip()
@@ -83,6 +121,15 @@ def _strip_parens(s: str) -> str:
 
 
 def _strip_quotes(s: str) -> str:
+    """
+    Removes surrounding quotes from a string if present.
+
+    Args:
+        s (str): The input string.
+
+    Returns:
+        str: The string with outer quotes removed, or the original string if no quotes.
+    """
     s = s.strip()
     s = _normalize_quotes(s)
     if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
@@ -91,6 +138,15 @@ def _strip_quotes(s: str) -> str:
 
 
 def _to_float_or_none(x: str) -> Optional[float]:
+    """
+    Extracts and converts a floating-point number from a string.
+
+    Args:
+        x (str): The input string containing a number.
+
+    Returns:
+        Optional[float]: The extracted float value, or None if no valid number is found.
+    """
     x = x.strip()
     m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", x)
     if not m:
@@ -197,6 +253,18 @@ def parse_model_output(
 # ─────────────────────────────────────────────────────────────
 
 def _get_chunk_text(chunk: Dict[str, Any]) -> str:
+    """
+    Extracts text content from a chunk dictionary.
+
+    Args:
+        chunk (Dict[str, Any]): A chunk dictionary that may contain text under various keys.
+
+    Returns:
+        str: The text content of the chunk.
+
+    Raises:
+        KeyError: If the chunk doesn't contain text under expected keys.
+    """
     for key in ("text", "content", "body"):
         if key in chunk and isinstance(chunk[key], str):
             return chunk[key]
@@ -204,6 +272,18 @@ def _get_chunk_text(chunk: Dict[str, Any]) -> str:
 
 
 def _require_chunk_uuid(chunk: Dict[str, Any]) -> str:
+    """
+    Validates and extracts the chunk_uuid from a chunk dictionary.
+
+    Args:
+        chunk (Dict[str, Any]): A chunk dictionary.
+
+    Returns:
+        str: The chunk_uuid as a string.
+
+    Raises:
+        KeyError: If chunk_uuid is missing or empty.
+    """
     if "chunk_uuid" not in chunk or not chunk["chunk_uuid"]:
         raise KeyError("Each chunk MUST include 'chunk_uuid' (used as source_id).")
     return str(chunk["chunk_uuid"])

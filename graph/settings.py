@@ -13,6 +13,15 @@ from dotenv import load_dotenv
 # ─────────────────────────────────────────────────────────────
 
 def _strip_quotes(val: Optional[str]) -> Optional[str]:
+    """
+    Removes surrounding quotes from environment variable values.
+
+    Args:
+        val (Optional[str]): The value to process.
+
+    Returns:
+        Optional[str]: The value with quotes stripped, or None if input was None.
+    """
     if val is None:
         return None
     v = val.strip()
@@ -21,10 +30,30 @@ def _strip_quotes(val: Optional[str]) -> Optional[str]:
     return v
 
 def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
+    """
+    Reads a string environment variable with quote stripping.
+
+    Args:
+        key (str): The environment variable name.
+        default (Optional[str], optional): Default value if not found. Defaults to None.
+
+    Returns:
+        Optional[str]: The environment variable value or default.
+    """
     val = os.getenv(key)
     return _strip_quotes(val) if val is not None else default
 
 def env_int(key: str, default: int) -> int:
+    """
+    Reads an integer environment variable with fallback to default.
+
+    Args:
+        key (str): The environment variable name.
+        default (int): Default value if not found or invalid.
+
+    Returns:
+        int: The parsed integer value or default.
+    """
     val = env_str(key)
     if val is None or val == "":
         return default
@@ -34,6 +63,16 @@ def env_int(key: str, default: int) -> int:
         return default
 
 def env_float(key: str, default: float) -> float:
+    """
+    Reads a float environment variable with fallback to default.
+
+    Args:
+        key (str): The environment variable name.
+        default (float): Default value if not found or invalid.
+
+    Returns:
+        float: The parsed float value or default.
+    """
     val = env_str(key)
     if val is None or val == "":
         return default
@@ -43,12 +82,33 @@ def env_float(key: str, default: float) -> float:
         return default
 
 def env_bool(key: str, default: bool) -> bool:
+    """
+    Reads a boolean environment variable with fallback to default.
+
+    Args:
+        key (str): The environment variable name.
+        default (bool): Default value if not found.
+
+    Returns:
+        bool: True if value is in {"1", "true", "yes", "y", "t"}, otherwise default.
+    """
     val = env_str(key)
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "yes", "y", "t"}
 
 def env_list(key: str, default_csv: str, sep: str = ",") -> List[str]:
+    """
+    Reads a delimited list environment variable.
+
+    Args:
+        key (str): The environment variable name.
+        default_csv (str): Default comma-separated value string.
+        sep (str, optional): Delimiter character. Defaults to ",".
+
+    Returns:
+        List[str]: List of trimmed non-empty values.
+    """
     raw = env_str(key, default_csv) or ""
     return [x.strip() for x in raw.split(sep) if x.strip()]
 
@@ -209,7 +269,16 @@ class Settings:
 
 def load_settings() -> Settings:
     """
-    Load .env once, parse & validate config, return a Settings object.
+    Loads and validates all application settings from environment variables.
+
+    Reads from .env file, parses configuration for provider, LLM, embeddings, chunking,
+    storage paths, and retrieval settings. Validates required fields based on provider.
+
+    Returns:
+        Settings: A fully configured Settings object.
+
+    Raises:
+        RuntimeError: If required environment variables are missing or invalid.
     """
     load_dotenv()  # called once at startup
 

@@ -19,6 +19,15 @@ import hashlib
 #--------------------------------------------------
 
 def normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalizes metadata dictionary by lowercasing keys and standardizing the language field.
+
+    Args:
+        meta (Dict[str, Any]): The metadata dictionary to normalize.
+
+    Returns:
+        Dict[str, Any]: Normalized metadata with lowercase keys.
+    """
     # Lower-case keys, unify language key
     meta = {str(k).lower(): v for k, v in (meta or {}).items()}
     # normalize to 'language'
@@ -27,6 +36,16 @@ def normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 def file_sha256(p: Path, chunk_size=1024*1024) -> str:
+    """
+    Computes the SHA-256 hash of a file.
+
+    Args:
+        p (Path): Path to the file.
+        chunk_size (int, optional): Size of chunks to read at a time. Defaults to 1MB.
+
+    Returns:
+        str: The hexadecimal SHA-256 hash of the file.
+    """
     h = hashlib.sha256()
     with p.open('rb') as f:
         for chunk in iter(lambda: f.read(chunk_size), b''):
@@ -35,8 +54,15 @@ def file_sha256(p: Path, chunk_size=1024*1024) -> str:
 
 def should_skip_ingestion(storage: Storage, p: Path, content_hash: Optional[str] = None) -> bool:
     """
-    Return True if file 'p' has already been ingested (same content_hash).
-    If 'content_hash' is provided, reuse it to avoid hashing twice.
+    Determines whether a file should be skipped during ingestion based on content hash.
+
+    Args:
+        storage (Storage): The storage instance to query.
+        p (Path): Path to the file to check.
+        content_hash (Optional[str], optional): Pre-computed content hash. If None, will be computed.
+
+    Returns:
+        bool: True if file has already been ingested with the same content, False otherwise.
     """
     doc = storage.get_document_by_filename(p.name)
     if not doc:
@@ -47,6 +73,17 @@ def should_skip_ingestion(storage: Storage, p: Path, content_hash: Optional[str]
 # Core functions ------------------------------------
 
 def parse_to_pages(filepath: Path):
+    """
+    Parses a file into pages and extracts metadata.
+
+    Args:
+        filepath (Path): Path to the file to parse.
+
+    Returns:
+        Tuple[Optional[List[Tuple[int, str]]], Dict[str, Any]]: A tuple containing:
+            - pages: List of (page_number, text) tuples, or None if parsing fails
+            - meta: Dictionary of extracted metadata
+    """
     pages = None
     meta = {}
     try:
@@ -60,7 +97,7 @@ def parse_to_pages(filepath: Path):
             pages = res
     except Exception:
         pages = None
-    
+
     return pages, meta
 
 def build_chunks(
@@ -133,7 +170,15 @@ def _resolve_type(votes: Counter, existing_type: str = "") -> str:
 
 
 def dedupe_entities_for_vectors(entities: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Return entities deduplicated by name, preferring typed entries over "unknown"."""
+    """
+    Deduplicates entities by name, preferring typed entries over "unknown" types.
+
+    Args:
+        entities (Sequence[Dict[str, Any]]): A sequence of entity dictionaries with 'name' and 'type' fields.
+
+    Returns:
+        List[Dict[str, Any]]: Deduplicated list of entities maintaining insertion order.
+    """
 
     dedup: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
@@ -410,7 +455,18 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
 
 
 def ingest_paths(paths: List[Path]):
-    """Ingests files at given paths into the storage system."""
+    """
+    Ingests files from given paths into the knowledge graph storage system.
+
+    This function processes files, chunks them, extracts entities and relationships,
+    and stores everything in the database and vector stores.
+
+    Args:
+        paths (List[Path]): List of file paths to ingest.
+
+    Returns:
+        None
+    """
     storage = Storage()
     storage.init()
 

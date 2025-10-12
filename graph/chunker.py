@@ -51,11 +51,29 @@ _SENT_END_SPLIT = re.compile(
 
 
 def _normalize_ws(text: str) -> str:
+    """
+    Normalizes whitespace in a text string by collapsing multiple spaces/newlines into single spaces.
+
+    Args:
+        text (str): The input text to normalize.
+
+    Returns:
+        str: Text with all whitespace sequences replaced by single spaces and leading/trailing whitespace removed.
+    """
     # Collapse whitespace/newlines to single spaces and strip ends
     return re.sub(r'\s+', ' ', (text or '').strip())
 
 
 def _split_sentences(text: str) -> List[str]:
+    """
+    Splits text into sentences based on sentence-ending punctuation patterns.
+
+    Args:
+        text (str): The input text to split into sentences.
+
+    Returns:
+        List[str]: A list of sentence strings. Each sentence is trimmed and non-empty.
+    """
     text = _normalize_ws(text)
     if not text:
         return []
@@ -81,6 +99,16 @@ class Sentence:
 
 
 def _flatten_pages_to_sentences(pages: List[Tuple[int, str]]) -> List[Sentence]:
+    """
+    Flattens a list of pages into a sequential list of sentences with global indexing.
+
+    Args:
+        pages (List[Tuple[int, str]]): A list of tuples where each tuple contains
+            (page_number, page_text).
+
+    Returns:
+        List[Sentence]: A list of Sentence objects with page number, text, and global index.
+    """
     # Ensure pages are processed in ascending page order
     pages_sorted = sorted(pages, key=lambda x: x[0])
     sentences: List[Sentence] = []
@@ -93,6 +121,16 @@ def _flatten_pages_to_sentences(pages: List[Tuple[int, str]]) -> List[Sentence]:
 
 
 def _sentences_len(sentences: Iterable[Sentence], join_with: str = " ") -> int:
+    """
+    Calculates the total character length of sentences when joined with a delimiter.
+
+    Args:
+        sentences (Iterable[Sentence]): An iterable of Sentence objects.
+        join_with (str, optional): The delimiter used to join sentences. Defaults to " ".
+
+    Returns:
+        int: The total character count including delimiters between sentences.
+    """
     # Return the total chars if we join the sentences with single spaces
     total = 0
     first = True

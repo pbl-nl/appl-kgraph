@@ -13,11 +13,23 @@ from openai import OpenAI, AzureOpenAI
 
 class Embedder:
     """
-    Provider-agnostic embeddings.
+    Provider-agnostic embeddings client for OpenAI and Azure OpenAI.
+
+    Supports both OpenAI and Azure OpenAI embedding models. Configuration can be
+    provided via constructor parameters or environment variables.
+
     For OpenAI:
       - OPENAI_API_KEY, OPENAI_EMBEDDINGS_MODEL, [OPENAI_BASE_URL]
     For Azure:
       - AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_EMB_DEPLOYMENT_NAME
+
+    Args:
+        provider (Optional[str]): The provider to use ('openai' or 'azure'). Defaults to settings.
+        model (Optional[str]): The embedding model name/deployment. Defaults to settings.
+        api_key (Optional[str]): API key for authentication. Defaults to settings.
+        azure_endpoint (Optional[str]): Azure OpenAI endpoint URL. Defaults to settings.
+        azure_api_version (Optional[str]): Azure API version. Defaults to settings.
+        base_url (Optional[str]): Base URL for OpenAI-compatible endpoints. Defaults to settings.
     """
     def __init__(
         self,
@@ -68,6 +80,16 @@ class Embedder:
         return self._dimension
     
     def embed_texts(self, texts: Iterable[str], batch_size: int = settings.embeddings.batch_size) -> List[List[float]]:
+        """
+        Generates embeddings for a list of texts in batches.
+
+        Args:
+            texts (Iterable[str]): An iterable of text strings to embed.
+            batch_size (int, optional): Number of texts to embed per API call. Defaults to settings.
+
+        Returns:
+            List[List[float]]: A list of embedding vectors, one per input text.
+        """
         out: List[List[float]] = []
         batch: List[str] = []
         for t in texts:
@@ -90,7 +112,10 @@ _CHAT_LOCK = threading.Lock()
 
 class Chat:
     """
-    Unified chat client. Chooses OpenAI or AzureOpenAI based on LLM_PROVIDER in settings.
+    Unified chat completion client for OpenAI and Azure OpenAI.
+
+    Automatically selects the appropriate provider based on LLM_PROVIDER in settings.
+    Provides a singleton pattern via Chat.singleton() for resource efficiency.
     """
     def __init__(self):
         prov = settings.provider.provider
@@ -122,6 +147,18 @@ class Chat:
              system: Optional[str] = None,
              temperature: Optional[float] = None,
              max_tokens: Optional[int] = None) -> str:
+        """
+        Generates a chat completion response from the LLM.
+
+        Args:
+            prompt (str): The user message/prompt to send to the LLM.
+            system (Optional[str], optional): System message to set context. Defaults to None.
+            temperature (Optional[float], optional): Sampling temperature. Defaults to settings.
+            max_tokens (Optional[int], optional): Maximum tokens in response. Defaults to settings.
+
+        Returns:
+            str: The generated text response from the LLM.
+        """
         t = settings.chat.temperature if temperature is None else temperature
         mt = settings.chat.max_tokens if max_tokens is None else max_tokens
 
@@ -140,6 +177,12 @@ class Chat:
     
     @classmethod
     def singleton(cls) -> "Chat":
+        """
+        Returns a thread-safe singleton instance of the Chat client.
+
+        Returns:
+            Chat: The singleton Chat instance.
+        """
         global _CHAT_SINGLETON
         if _CHAT_SINGLETON is None:
             with _CHAT_LOCK:
@@ -149,7 +192,14 @@ class Chat:
 
 def llm_summarize_text(to_summarize: str, language: str = "English") -> str:
     """
-    Small helper used elsewhere (e.g., during long description merges).
+    Summarizes text using the LLM, typically for condensing long descriptions.
+
+    Args:
+        to_summarize (str): The text to summarize.
+        language (str, optional): The desired output language. Defaults to "English".
+
+    Returns:
+        str: The summarized text.
     """
     chat = Chat.singleton()  # provider-agnostic
     prompt = PROMPTS["summarize_text"].format(text=to_summarize, language=language)

@@ -7,6 +7,16 @@ from fileparser import FileParser
 from pathrag import render_full_context
 
 async def ask_with_pathrag(question: str, verbose: bool = False) -> None:
+    """
+    Asks a question using PathRAG retrieval and prints the answer with context.
+
+    Args:
+        question (str): The question to ask.
+        verbose (bool, optional): If True, displays full context details. Defaults to False.
+
+    Returns:
+        None
+    """
     rag = PathRAG(
         system_prompt=""
     )
@@ -21,6 +31,11 @@ async def ask_with_pathrag(question: str, verbose: bool = False) -> None:
             print(f"\n[{window.label}] score={window.score:.2f}\n{window.text}")
 
 def main():
+    """
+    Main entry point for document ingestion and Q&A demonstration.
+
+    Ingests documents from the 'docs' directory and runs a sample PathRAG query.
+    """
     root = Path('docs')
     paths = FileParser(root).filepaths
     if not paths:

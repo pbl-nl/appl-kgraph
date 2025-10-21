@@ -60,7 +60,7 @@ class FileParser:
             'filepath': str(filepath.absolute()),
             'file_size': stat.st_size,
             'last_modified': stat.st_mtime,
-            'created': stat.st_ctime,
+            'created': stat.st_birthtime,
             'extension': extension,
             'mime_type': mimetypes.guess_type(str(filepath))[0]
         }

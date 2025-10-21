@@ -441,7 +441,7 @@ def ingest_paths(paths: List[Path]):
             "filepath": str(p),                          # keep if useful for tracing
             "file_size": st.st_size,
             "last_modified": st.st_mtime,
-            "created": st.st_mtime,                      
+            "created": st.st_birthtime,                      
             "extension": p.suffix.lower(),
             "mime_type": ((file_meta or {}).get("mime_type") or mimetypes.guess_type(str(p))[0] or ""),
             "language": (file_meta or {}).get("language", "unknown"),

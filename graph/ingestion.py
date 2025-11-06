@@ -132,11 +132,6 @@ def build_chunks(
         })
     return norm
 
-# TODO: While grouping nodes and edges, pay attention to not exceed any DB field limits
-# and also more importantly make sure that DELIMITER and some unnecessary punctuations at the start/end of merged fields are removed.
-# e.g. if a node description is "desc1||desc2||", it should be "desc1||desc2" after merging.
-# sometimes LLM generated descriptions or former versions may have trailing punctuation like .,;! etc.
-
 def _resolve_type(votes: Counter, existing_type: str = "") -> str:
     existing = (existing_type or "").strip()
     if not votes:

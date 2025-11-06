@@ -246,9 +246,9 @@ class RetrievalSettings:
     path_window_tokens: int = 512    # tokens per path window
 
     # --- LightRAG-specific retrieval settings ---
-    light_mode: str = "hybrid"       # 'chunks', 'graph', 'hybrid'
-    response_type: str = "Multiple Paragraphs" #'Multiple Paragraphs', 'Single Paragraph
-    
+    light_mode: str = "mix"       # 'local', 'global', 'hybrid', 'mix' # TODO: Implement 'naive' to the light mode
+    response_type: str = "Multiple Paragraphs" #'Multiple Paragraphs', 'Single Paragraph'
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -400,7 +400,7 @@ def load_settings() -> Settings:
         path_max_windows = env_int("RETRIEVAL_PATH_MAX_WINDOWS", 5),
         path_window_tokens = env_int("RETRIEVAL_PATH_WINDOW_TOKENS", 512),
         # LightRAG-specific
-        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "hybrid") or "hybrid",
+        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "hybrid") or "mix",
         response_type = env_str("RETRIEVAL_RESPONSE_TYPE", "Multiple Paragraphs") or "Multiple Paragraphs",
     )
 

@@ -5,13 +5,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Sequence, Tuple, Optional
 from collections import Counter, defaultdict
 
-from storage import Storage, _normalize_pair
+from db_storage import Storage, _normalize_pair
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
 from extractor import extract_from_chunks
 from llm import llm_summarize_text
 from settings import settings
-import os
 import hashlib
 
 #--------------------------------------------------

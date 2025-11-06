@@ -56,6 +56,8 @@ async def ask_with_lightrag(question: str, verbose: bool = False) -> None:
         # Keep your existing brief printout (only windows)
         for window in result.context_windows:
             print(f"\n[{window.label}] score={window.score:.2f}\n{window.text}")
+    
+    return result
 
 def main():
     """
@@ -71,12 +73,14 @@ def main():
     ingest_paths(paths)
     query = "Who are the authors of LayoutParser and do they overlap any of the other articles?"
     query = input("Enter your question: ")
+    conversation_history = []
     while query not in ("exit", "quit"):
         print("\n--- PathRAG Response ---\n")
         asyncio.run(ask_with_pathrag(query, verbose=True))
         print("\n---\n")
         print("\n--- LightRAG Response ---\n")
-        asyncio.run(ask_with_lightrag(query, verbose=True))
+        result = asyncio.run(ask_with_lightrag(query, verbose=True))
+        conversation_history.append((query, result.answer))
         print("\n---\n")
         query = input("Enter your question: ")
 

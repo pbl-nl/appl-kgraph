@@ -2,15 +2,13 @@
 from __future__ import annotations
 import os
 import sqlite3
-import json, hashlib
-from typing import Dict, Any, Iterable, List, Optional, Sequence, Tuple
+import json
+import hashlib
+from typing import Dict, Any, List, Optional, Sequence, Tuple
 from contextlib import contextmanager
 from dataclasses import replace
-from dotenv import load_dotenv
-from openai import OpenAI, AzureOpenAI
-from llm import Embedder
 import chromadb  
-
+from llm import Embedder
 from settings import settings, StoragePaths as SettingsStoragePaths
 
 # ---------------------------
@@ -657,13 +655,8 @@ class GraphDB:
 
 class _ChromaBase:
     def __init__(self, collection: str, chroma_dir: str, embedder: Optional[Embedder] = None):
-        if chromadb is None:
-            if _CHROMADB_IMPORT_ERROR is not None:
-                raise RuntimeError(
-                    "chromadb is required for vector storage. Install it with `pip install chromadb`."
-                ) from _CHROMADB_IMPORT_ERROR
-            raise RuntimeError("chromadb is required for vector storage. Install it with `pip install chromadb`.")
-
+        self._chroma_dir = chroma_dir
+        
         _ensure_dir_for(os.path.join(chroma_dir, ".sentinel"))
         self.client = chromadb.PersistentClient(path=chroma_dir)  # type: ignore
         self.col = self.client.get_or_create_collection(

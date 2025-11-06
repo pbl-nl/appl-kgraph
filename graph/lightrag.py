@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -13,8 +12,8 @@ import networkx as nx
 import tiktoken
 
 from settings import settings
-from storage import Storage
-from storage import StoragePaths
+from db_storage import Storage
+from db_storage import StoragePaths
 from llm import Chat
 from prompts import PROMPTS
 
@@ -771,6 +770,9 @@ def build_context(
     Returns:
         Tuple of (entities_context, relations_context, all_chunks)
     """
+    # TODO: Implement 'naive' to the light mode and update light_mode in settings.retrieval
+    # 'naive' mode would skip node and edge data retrieval and only use vector chunks
+
     # 2.a) Get node data
     node_datas, use_relations, entities_context1, relations_context1 = get_node_data(
         adapter, ll_keywords, top_k_entities
@@ -785,6 +787,7 @@ def build_context(
     vector_chunks = get_vector_context(adapter, query, top_k_chunks) if settings.retrieval.light_mode in ("mix") else []
 
     # Combine contexts
+    # TODO: Handle duplicates better
     entities_context = entities_context1 + entities_context2
     relations_context = relations_context1 + relations_context2
 
@@ -824,7 +827,7 @@ def build_context(
             seen_uuids.add(chunk_id)
             deduplicated_chunks.append(chunk)
     
-    # TODO: Rerank by topk should be here
+    # TODO: Rerank by top_k should be here
     # TODO: Apply any chunk_top_k limit if needed
     # TODO: Truncate chunk text by chunk_window_tokens if needed
 
@@ -960,6 +963,11 @@ class LightRAG:
             settings.retrieval.graph_depth,  # reusing as history_turns
         )
 
+        # TODO: Mode resetting changes based on keywords presence
+        # Handle empty keywords (check lightrag's operate.py for kg_query
+        # after the call of get_keywords_from_query)
+    
+
         LOGGER.debug(f"Extracted keywords - HL: {hl_keywords}, LL: {ll_keywords}")
 
         # 2-4) Build context
@@ -975,6 +983,7 @@ class LightRAG:
         )
 
         # Format context for prompt
+        # TODO: check if needed
         context_block = format_context_for_prompt(
             entities_context,
             relations_context,

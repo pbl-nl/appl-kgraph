@@ -400,8 +400,8 @@ def load_settings() -> Settings:
         path_max_windows = env_int("RETRIEVAL_PATH_MAX_WINDOWS", 5),
         path_window_tokens = env_int("RETRIEVAL_PATH_WINDOW_TOKENS", 512),
         # LightRAG-specific
-        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "hybrid") or "mix",
-        response_type = env_str("RETRIEVAL_RESPONSE_TYPE", "Multiple Paragraphs") or "Multiple Paragraphs",
+        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "hybrid"),
+        response_type = env_str("RETRIEVAL_RESPONSE_TYPE", "Multiple Paragraphs"),
     )
 
     return Settings(

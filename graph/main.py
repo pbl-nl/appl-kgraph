@@ -23,10 +23,8 @@ async def ask_with_pathrag(question: str, verbose: bool = False) -> None:
     result = await rag.aretrieve(question)
     print("Answer:\n", result.answer)
 
-# Always show context windows (your current behavior)
     print(render_full_context(result) if verbose else "")
     if not verbose:
-        # Keep your existing brief printout (only windows)
         for window in result.context_windows:
             print(f"\n[{window.label}] score={window.score:.2f}\n{window.text}")
 
@@ -50,12 +48,7 @@ async def ask_with_lightrag(question: str, verbose: bool = False) -> None:
     result = await rag.aretrieve(question)
     print("Answer:\n", result.answer)
 
-    # Always show context windows (your current behavior)
     print(render_full_context(result) if verbose else "")
-    if not verbose:
-        # Keep your existing brief printout (only windows)
-        for window in result.context_windows:
-            print(f"\n[{window.label}] score={window.score:.2f}\n{window.text}")
     
     return result
 
@@ -71,7 +64,7 @@ def main():
         print("No files to ingest.")
         return
     ingest_paths(paths)
-    query = "Who are the authors of LayoutParser and do they overlap any of the other articles?"
+    # query = "Who are the authors of LayoutParser and do they overlap any of the other articles?"
     query = input("Enter your question: ")
     conversation_history = []
     while query not in ("exit", "quit"):

@@ -447,7 +447,6 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
     return affected
 
 
-
 def ingest_paths(paths: List[Path]):
     """
     Ingests files from given paths into the knowledge graph storage system.
@@ -540,7 +539,6 @@ def ingest_paths(paths: List[Path]):
         if all_relations:
             storage.upsert_relation_vector(all_relations)
 
-        #TODO: Add a node for filename/document with edges to all entities/relations extracted from it.
 
 def main():
     root = Path('docs')

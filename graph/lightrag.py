@@ -770,7 +770,7 @@ def build_context(
     Returns:
         Tuple of (entities_context, relations_context, all_chunks)
     """
-    # TODO: Implement 'naive' to the light mode and update light_mode in settings.retrieval
+    # TODO: LATER: Implement 'naive' to the light mode and update light_mode in settings.retrieval
     # 'naive' mode would skip node and edge data retrieval and only use vector chunks
 
     # 2.a) Get node data

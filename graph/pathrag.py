@@ -12,8 +12,8 @@ import networkx as nx
 import tiktoken
 
 from settings import settings
-from storage import Storage
-from storage import StoragePaths
+from db_storage import Storage
+from db_storage import StoragePaths
 from llm import Chat
 from prompts import PROMPTS
 
@@ -755,6 +755,7 @@ class PathRAG:
     # Retrieval entry points
     # ------------------------------------------------------------------
     async def aretrieve(self, question: str) -> RetrievalResult:
+        # TODO: add conversation history support. LightRAG first extracts keywords from history, then uses last n turns in system prompt.
         LOGGER.info("Running retrieval for query: %s", question)
 
         entity_matches = self._storage.query_entities(question, limit=settings.retrieval.entity_top_k)
@@ -836,6 +837,8 @@ class PathRAG:
         context_windows = global_windows + local_windows
         context_block = format_windows_for_prompt(context_windows)
 
+        # TODO: support chat history
+        # TODO: Change the prompt to match the lightrag style
         prompt = RAG_PROMPT.format(context=context_block, question=question)
         answer = await self._chat.generate(
             prompt,
@@ -873,4 +876,3 @@ __all__ = [
     "ContextWindow",
     "RetrievalResult",
 ]
-

@@ -23,12 +23,34 @@ async def ask_with_pathrag(question: str, verbose: bool = False) -> None:
     result = await rag.aretrieve(question)
     print("Answer:\n", result.answer)
 
-# Always show context windows (your current behavior)
     print(render_full_context(result) if verbose else "")
     if not verbose:
-        # Keep your existing brief printout (only windows)
         for window in result.context_windows:
             print(f"\n[{window.label}] score={window.score:.2f}\n{window.text}")
+
+
+async def ask_with_lightrag(question: str, verbose: bool = False) -> None:
+    """
+    Asks a question using LightRAG retrieval and prints the answer with context.
+
+    Args:
+        question (str): The question to ask.
+        verbose (bool, optional): If True, displays full context details. Defaults to False.
+
+    Returns:
+        None
+    """
+    from lightrag import LightRAG
+    from lightrag import render_full_context
+    rag = LightRAG(
+        system_prompt=""
+    )
+    result = await rag.aretrieve(question)
+    print("Answer:\n", result.answer)
+
+    print(render_full_context(result) if verbose else "")
+    
+    return result
 
 def main():
     """
@@ -42,7 +64,18 @@ def main():
         print("No files to ingest.")
         return
     ingest_paths(paths)
-    asyncio.run(ask_with_pathrag("Who are the authors of LayoutParser and do they overlap any of the other articles?", verbose=True))
+    # query = "Who are the authors of LayoutParser and do they overlap any of the other articles?"
+    query = input("Enter your question: ")
+    conversation_history = []
+    while query not in ("exit", "quit"):
+        print("\n--- PathRAG Response ---\n")
+        asyncio.run(ask_with_pathrag(query, verbose=True))
+        print("\n---\n")
+        print("\n--- LightRAG Response ---\n")
+        result = asyncio.run(ask_with_lightrag(query, verbose=True))
+        conversation_history.append((query, result.answer))
+        print("\n---\n")
+        query = input("Enter your question: ")
 
 if __name__ == "__main__":
     main()

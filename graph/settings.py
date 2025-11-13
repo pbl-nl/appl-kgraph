@@ -244,7 +244,11 @@ class RetrievalSettings:
     path_alpha: float = 0.8          # propagation decay
     path_max_windows: int = 5        # how many path windows to emit
     path_window_tokens: int = 512    # tokens per path window
-    
+
+    # --- LightRAG-specific retrieval settings ---
+    light_mode: str = "mix"       # 'local', 'global', 'hybrid', 'mix' # TODO: Implement 'naive' to the light mode
+    response_type: str = "Multiple Paragraphs" #'Multiple Paragraphs', 'Single Paragraph'
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -395,6 +399,9 @@ def load_settings() -> Settings:
         path_alpha = env_float("RETRIEVAL_PATH_ALPHA", 0.8),
         path_max_windows = env_int("RETRIEVAL_PATH_MAX_WINDOWS", 5),
         path_window_tokens = env_int("RETRIEVAL_PATH_WINDOW_TOKENS", 512),
+        # LightRAG-specific
+        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "hybrid"),
+        response_type = env_str("RETRIEVAL_RESPONSE_TYPE", "Multiple Paragraphs"),
     )
 
     return Settings(

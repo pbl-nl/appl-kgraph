@@ -5,13 +5,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Sequence, Tuple, Optional
 from collections import Counter, defaultdict
 
-from storage import Storage, _normalize_pair
+from db_storage import Storage, _normalize_pair
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
 from extractor import extract_from_chunks
 from llm import llm_summarize_text
 from settings import settings
-import os
 import hashlib
 
 #--------------------------------------------------
@@ -132,11 +131,6 @@ def build_chunks(
             "end_page": end,
         })
     return norm
-
-# TODO: While grouping nodes and edges, pay attention to not exceed any DB field limits
-# and also more importantly make sure that DELIMITER and some unnecessary punctuations at the start/end of merged fields are removed.
-# e.g. if a node description is "desc1||desc2||", it should be "desc1||desc2" after merging.
-# sometimes LLM generated descriptions or former versions may have trailing punctuation like .,;! etc.
 
 def _resolve_type(votes: Counter, existing_type: str = "") -> str:
     existing = (existing_type or "").strip()
@@ -453,7 +447,6 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
     return affected
 
 
-
 def ingest_paths(paths: List[Path]):
     """
     Ingests files from given paths into the knowledge graph storage system.
@@ -546,7 +539,6 @@ def ingest_paths(paths: List[Path]):
         if all_relations:
             storage.upsert_relation_vector(all_relations)
 
-        #TODO: Add a node for filename/document with edges to all entities/relations extracted from it.
 
 def main():
     root = Path('docs')

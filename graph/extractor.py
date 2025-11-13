@@ -8,7 +8,7 @@ from llm import Chat
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from settings import settings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from storage import Storage
+from db_storage import Storage
 import hashlib
 
 # ─────────────────────────────────────────────────────────────
@@ -317,7 +317,6 @@ def extract_from_chunks(
     NOTES:
     - Prompts are built with `build_entity_relation_prompt(...)`.
     - Parsing uses `parse_model_output(...)`.
-    - The #TODO you added is preserved below (applied per-chunk after parsing).
     """
     # Pull settings
     MAX_WORKERS = settings.llmperf.max_concurrency
@@ -399,9 +398,6 @@ def extract_from_chunks(
         for r in parsed.relationships:
             r["source_id"] = source_id
             r["filepath"] = filepath
-
-        # TODO: ask whether the extraction is really completed
-        # If not send with new prompt to complete
 
         all_entities.extend(parsed.entities)
         all_relationships.extend(parsed.relationships)

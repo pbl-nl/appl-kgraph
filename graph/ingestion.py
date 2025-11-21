@@ -474,6 +474,9 @@ def ingest_paths(paths: List[Path]):
         if should_skip_ingestion(storage, p, content_hash):
             print(f"Skipping {p.name} (unchanged).")
             continue
+        # if docx and startswith('~'):
+        if p.name.startswith('~'):
+            continue
         pages, file_meta = parse_to_pages(p)
         if not pages or not file_meta:
             print(f"Skipping {p} due to parsing error.")

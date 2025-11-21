@@ -184,6 +184,10 @@ class DocumentsDB:
                 documents.append(dict(zip(self.KEYS, row)))
             return documents
 
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """Alias for list_documents for backward compatibility."""
+        return self.list_documents()
+
     def delete_document(self, doc_id: str) -> None:
         with self.connect() as con:
             con.execute("DELETE FROM documents WHERE doc_id = ?;", (doc_id,))
@@ -491,6 +495,27 @@ class GraphDB:
             ''', tuple(names))
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
+    
+
+    def get_nodes_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        if not chunk_uuids:
+            return []
+        results = []
+        with self.connect() as con:
+            # Find all nodes that contain any of our chunk_uuids in their source_id
+            for chunk_uuid in chunk_uuids:
+                # Query nodes
+                cur = con.cursor()
+                cur.execute("""
+                    SELECT name, type, description, source_id, filepath
+                    FROM nodes
+                    WHERE source_id LIKE ?
+                """, (f"%{chunk_uuid}%",))
+                rows = cur.fetchall()
+                keys = [k for k in self.KEYS_NODE if k != "id"]
+                results.extend([dict(zip(keys, row)) for row in rows] if rows else [])
+
+        return results
 
     def delete_node(self, name: str) -> None:
         """
@@ -596,6 +621,26 @@ class GraphDB:
             ''', tuple(flat_params))
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
+        
+    def get_edges_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        if not chunk_uuids:
+            return []
+        results = []
+        with self.connect() as con:
+            # Find all edges that contain any of our chunk_uuids in their source_id
+            for chunk_uuid in chunk_uuids:
+                # Query edges
+                cur = con.cursor()
+                cur.execute("""
+                    SELECT source_name, target_name, weight, description, keywords, source_id, filepath
+                    FROM edges
+                    WHERE source_id LIKE ?
+                """, (f"%{chunk_uuid}%",))
+                rows = cur.fetchall()
+                keys = [k for k in self.KEYS_EDGE if k not in {"id", "u_source_name", "u_target_name"}]
+                results.extend([dict(zip(keys, row)) for row in rows] if rows else [])
+
+        return results
         
     def delete_edge(self, source_name: str, target_name: str) -> None:
         u_src, u_tgt = _normalize_pair(source_name, target_name)
@@ -1048,6 +1093,10 @@ class Storage:
     def list_documents(self) -> List[Dict[str, Any]]:
         return self.documents.list_documents()
 
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """Alias for list_documents for backward compatibility."""
+        return self.documents.get_all_documents()
+
     # 2) Chunks
     def get_chunks_by_doc_id(self, doc_id: str) -> List[Dict[str, Any]]:
         return self.chunks.get_chunks_by_doc_id(doc_id)
@@ -1070,12 +1119,18 @@ class Storage:
 
     def get_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
         return self.graph.get_nodes(names)
+    
+    def get_nodes_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        return self.graph.get_nodes_by_chunk_uuids(chunk_uuids)
 
     def get_edge(self, source_name: str, target_name: str) -> Optional[Dict[str, Any]]:
         return self.graph.get_edge(source_name, target_name)
 
     def get_edges(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
         return self.graph.get_edges(pairs)
+    
+    def get_edges_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        return self.graph.get_edges_by_chunk_uuids(chunk_uuids)
 
     # 4) Chunk Vectors
     def get_chunk_vector(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:

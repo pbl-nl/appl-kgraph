@@ -660,7 +660,7 @@ def ingest_paths(paths: List[Path]):
         if not pages or not file_meta:
             print(f"Skipping {p} due to parsing error.")
             continue
-        doc_exists = storage.get_document_by_filename(p.name).get("filename") == p.name
+        doc_exists = storage.get_document_by_filename(p.name).get("filename") == p.name if storage.get_document_by_filename(p.name) else False
         if doc_exists: # document exists but content hash differs.
             remove_document_from_storage(storage, p.name)
 

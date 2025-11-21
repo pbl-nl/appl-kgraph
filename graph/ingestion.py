@@ -474,6 +474,12 @@ def ingest_paths(paths: List[Path]):
         if should_skip_ingestion(storage, p, content_hash):
             print(f"Skipping {p.name} (unchanged).")
             continue
+        # skip temporary files created by ms word
+        if ((p.name.lower().startswith("~$") and p.name.lower().endswith((".docx", ".doc"))) or
+            (p.name.lower().endswith((".tmp", ".temp")) and "word" in p.name.lower())):
+            print(f"Skipping temporary file {p.name}.")
+            continue
+
         pages, file_meta = parse_to_pages(p)
         if not pages or not file_meta:
             print(f"Skipping {p} due to parsing error.")

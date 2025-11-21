@@ -619,6 +619,28 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
     print("Removing document from DocumentsDB")
     storage.delete_document(doc_id)
 
+    # Step 8: Sanity check
+    # If a node removed and if the edge is still there, that is a problem
+    # But the other way around is fine (edge removed but node exists)
+    # The latter might lead to orphan nodes, which is acceptable for now
+    # we will apply cross check with set operations by looking at all edges and nodes again
+    all_doc_ids = {d["doc_id"] for d in storage.get_all_documents() if d.get("doc_id")}
+    all_chunks = []
+    for d in all_doc_ids:
+        chs = storage.get_chunks_by_doc_id(d)
+        all_chunks.extend(chs or [])
+    all_chunk_uuids = [c["chunk_uuid"] for c in all_chunks if c.get("chunk_uuid")]
+    nodes_after = storage.get_nodes_by_chunk_uuids(all_chunk_uuids)
+    edges_after = storage.get_edges_by_chunk_uuids(all_chunk_uuids)
+    node_names_after = {n["name"] for n in nodes_after if n.get("name")}
+    for e in edges_after:
+        src, tgt = e.get("source_name"), e.get("target_name")
+        if src not in node_names_after or tgt not in node_names_after:
+            print(f"Sanity Check Warning: Edge ({src}, {tgt}) exists without corresponding nodes after deletion.")
+            storage.delete_edges( [(src, tgt)] )
+            storage.delete_relation_vector( [(src, tgt)] )
+            print(f"Removed edge ({src}, {tgt}) due to missing nodes.")
+
     print(f"Successfully removed document {filename} and all associated data")
 
 

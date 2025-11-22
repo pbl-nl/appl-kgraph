@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import networkx as nx
 import tiktoken
+from flashrank import Ranker, RerankRequest
 
 from settings import settings
 from db_storage import Storage
@@ -91,14 +92,16 @@ def count_tokens(text: str, model: str) -> int:
     return len(_encoder(model).encode(text))
 
 
-def truncate_by_tokens(text: str, max_tokens: int, model: str) -> str:
+def truncate_by_tokens(list_dict: List[Dict[str, Any]], max_tokens: int, model: str) -> List[Dict[str, Any]]:
     if max_tokens <= 0:
-        return ""
-    encoding = _encoder(model)
-    tokens = encoding.encode(text)
-    if len(tokens) <= max_tokens:
-        return text
-    return encoding.decode(tokens[:max_tokens])
+        return []
+    tokens = 0
+    for i, item in enumerate(list_dict):
+        item_tokens = count_tokens(str(item), model)
+        tokens += item_tokens
+        if tokens > max_tokens:
+            return list_dict[:i]
+    return list_dict
 
 
 def join_non_empty(parts: Iterable[str], delimiter: str = "\n") -> str:
@@ -679,7 +682,7 @@ def extract_chunks_from_nodes(
         chunk_uuids = node.get("chunk_uuids", [])
 
         # Take top_k chunk_uuids
-        for chunk_uuid in chunk_uuids[:top_k_chunks]:
+        for chunk_uuid in chunk_uuids:#[:top_k_chunks]:
             # Calculate relation_score: count neighbors with same chunk_uuid
             relation_score = 0
             if name in graph:
@@ -734,7 +737,7 @@ def extract_chunks_from_edges(
         chunk_uuids = edge.get("chunk_uuids", [])
 
         # Take top_k chunk_uuids
-        for chunk_uuid in chunk_uuids[:top_k_chunks]:
+        for chunk_uuid in chunk_uuids:#[:top_k_chunks]:
             # Only assign index on first occurrence
             if chunk_uuid not in chunk_index_map:
                 chunk_index_map[chunk_uuid] = edge_idx
@@ -754,11 +757,55 @@ def extract_chunks_from_edges(
     return result_chunks
 
 
+def rerank(
+    query: str,
+    retrieved_docs: List[Dict[str, Any]],
+    top_n: int,
+    text_key: str = "text"
+) -> List[Dict[str, Any]]:
+    """
+    Rerank retrieved documents using FlashRank.
+    
+    Args:
+        query: The original user query
+        retrieved_docs: List of retrieved document chunks
+        top_n: Number of top documents to return after reranking
+        text_key: Key in document dict containing text (default: "text")
+    
+    Returns:
+        Reranked list of document indices
+    """
+    if not retrieved_docs:
+        return []
+    
+    # Initialize ranker (lightweight model)
+    ranker = Ranker(cache_dir=settings.retrieval.rerank_cache_dir)
+    
+    # Create rerank request
+    rerank_request = RerankRequest(
+        query=query, 
+        passages=[{"text": doc.get(text_key, "")} for doc in retrieved_docs]
+    )
+    
+    # Get reranked results
+    results = ranker.rerank(rerank_request)
+    
+    # Map back to original indices
+    reranked_idx = []
+    text_list = [doc.get(text_key, "") for doc in retrieved_docs]
+    for result in results[:top_n]:
+        idx = text_list.index(result["text"])
+        reranked_idx.append(idx)
+    
+    return reranked_idx
+
+
 def build_context(
     adapter: StorageAdapter,
     query: str,
     hl_keywords: List[str],
     ll_keywords: List[str],
+    retrieval_mode: str,
     top_k_entities: int,
     top_k_relations: int,
     top_k_chunks: int,
@@ -770,26 +817,32 @@ def build_context(
     Returns:
         Tuple of (entities_context, relations_context, all_chunks)
     """
-    # TODO: LATER: Implement 'naive' to the light mode and update light_mode in settings.retrieval
-    # 'naive' mode would skip node and edge data retrieval and only use vector chunks
 
     # 2.a) Get node data
     node_datas, use_relations, entities_context1, relations_context1 = get_node_data(
         adapter, ll_keywords, top_k_entities
-    ) if settings.retrieval.light_mode in ("local", "hybrid", "mix") else ([], [], [], [])
+    ) if retrieval_mode in ("local", "hybrid", "mix") else ([], [], [], [])
 
     # 2.b) Get edge data
     edge_datas, use_entities, entities_context2, relations_context2 = get_edge_data(
         adapter, hl_keywords, top_k_relations
-    ) if settings.retrieval.light_mode in ("global", "hybrid", "mix") else ([], [], [], [])
+    ) if retrieval_mode in ("global", "hybrid", "mix") else ([], [], [], [])
 
     # 2.c) Get vector context
-    vector_chunks = get_vector_context(adapter, query, top_k_chunks) if settings.retrieval.light_mode in ("mix") else []
+    vector_chunks = get_vector_context(adapter, query, top_k_chunks) if retrieval_mode in ("mix", "naive") else []
 
     # Combine contexts
-    # TODO: Handle duplicates better
-    entities_context = entities_context1 + entities_context2
-    relations_context = relations_context1 + relations_context2
+    seen = {e["entity"] for e in entities_context1}
+    unseen = [e for e in entities_context2 if e["entity"] not in seen]
+    entities_context = entities_context1 + unseen
+    for idx, entity in enumerate(entities_context):
+        entity["id"] = str(idx + 1)
+
+    seen = {(r["entity1"], r["entity2"]) for r in relations_context1}
+    unseen = [r for r in relations_context2 if (r["entity1"], r["entity2"]) not in seen]
+    relations_context = relations_context1 + unseen
+    for idx, relation in enumerate(relations_context):
+        relation["id"] = str(idx + 1)
 
     # Get original node and edge datas (unique only)
     original_node_datas = list(node_datas)
@@ -827,10 +880,31 @@ def build_context(
             seen_uuids.add(chunk_id)
             deduplicated_chunks.append(chunk)
     
-    # TODO: Rerank by top_k should be here
-    # TODO: Apply any chunk_top_k limit if needed
-    # TODO: Truncate chunk text by chunk_window_tokens if needed
+    #Rerank by top_k
+    if settings.retrieval.enable_rerank and query and deduplicated_chunks:
+        rerank_top_k = settings.retrieval.rerank_top_k or len(deduplicated_chunks)
+        deduplicated_chunk_ids = rerank(
+            query=query,
+            retrieved_docs=deduplicated_chunks,
+            top_n=rerank_top_k,
+        )
+        print(f"Reranked chunks: kept {len(deduplicated_chunk_ids)} chunks after reranking, it was {len(deduplicated_chunks)} before reranking")
+        deduplicated_chunks = [deduplicated_chunks[idx] for idx in deduplicated_chunk_ids]
 
+    # Apply chunk_top_k limit if needed
+    if settings.retrieval.chunk_top_k is not None and settings.retrieval.chunk_top_k > 0:
+        if len(deduplicated_chunks) > settings.retrieval.chunk_top_k:
+            deduplicated_chunks = deduplicated_chunks[: settings.retrieval.chunk_top_k]
+            LOGGER.debug(
+                f"Chunk top-k limiting: kept {len(deduplicated_chunks)} chunks (chunk_top_k={settings.retrieval.chunk_top_k})"
+            )
+
+    # Truncate chunk text by chunk_window_tokens
+    if settings.retrieval.truncate_chunks and settings.retrieval.chunk_window_tokens > 0:
+        model = settings.retrieval.tiktoken_model
+        deduplicated_chunks = truncate_by_tokens(deduplicated_chunks, settings.retrieval.chunk_window_tokens, model)
+        print(f"Truncated chunks: kept {len(deduplicated_chunks)} chunks after truncation")
+    
 
     return entities_context, relations_context, deduplicated_chunks
 
@@ -839,44 +913,6 @@ def build_context(
 # Prompt formatting
 # ---------------------------------------------------------------------------
 
-def format_context_for_prompt(
-    entities_context: List[Dict[str, Any]],
-    relations_context: List[Dict[str, Any]],
-    all_chunks: List[Dict[str, Any]],
-) -> str:
-    """Format the context for the LLM prompt."""
-    lines = []
-
-    # Entities
-    if entities_context:
-        lines.append("=== Entities ===")
-        for entity in entities_context:
-            lines.append(
-                f"[{entity['id']}] {entity['entity']} ({entity['type']}): "
-                f"{entity['description']}"
-            )
-        lines.append("")
-
-    # Relations
-    if relations_context:
-        lines.append("=== Relations ===")
-        for relation in relations_context:
-            lines.append(
-                f"[{relation['id']}] {relation['entity1']} ↔ {relation['entity2']}: "
-                f"{relation['description']}"
-            )
-        lines.append("")
-
-    # Chunks
-    if all_chunks:
-        lines.append("=== Text Chunks ===")
-        for idx, chunk in enumerate(all_chunks, 1):
-            source = chunk.get("source_type", "unknown")
-            lines.append(f"[{idx}] ({source}): {chunk['text']}")
-        lines.append("")
-
-    return "\n".join(lines)
-
 def lightrag_prompt(
     entities_context: List[Dict[str, Any]],
     relations_context: List[Dict[str, Any]],
@@ -884,7 +920,8 @@ def lightrag_prompt(
     history: Optional[List[Tuple[str, str]]]=None,
 ) -> str:
     """Generate a system prompt for LightRAG."""
-    context = f"""-----Entities(KG)-----
+
+    kg_context = f"""-----Entities(KG)-----
 
 ```json
 {json.dumps(entities_context, ensure_ascii=False)}
@@ -896,16 +933,18 @@ def lightrag_prompt(
 {json.dumps(relations_context, ensure_ascii=False)}
 ```
 
------Document Chunks(DC)-----
-
+"""
+    naive_context = f"""-----Document Chunks(DC)-----
 ```json
 {json.dumps(all_chunks, ensure_ascii=False)}
 ```
 
 """
+    
+    context = naive_context if settings.retrieval.light_mode == "naive" else kg_context + naive_context
     history_context = get_conversation_turns(history)
     user_prompt = PROMPTS["DEFAULT_USER_PROMPT"]
-    sys_prompt_template = PROMPTS["rag_response"]
+    sys_prompt_template = PROMPTS["rag_response"] if settings.retrieval.light_mode != "naive" else PROMPTS["rag_response_naive"]
     sys_prompt = sys_prompt_template.format(
         context_data=context,
         response_type=settings.retrieval.response_type,
@@ -919,12 +958,6 @@ def lightrag_prompt(
 # ---------------------------------------------------------------------------
 # LightRAG entry point
 # ---------------------------------------------------------------------------
-
-RAG_PROMPT = (
-    "You are a helpful assistant. Use the supplied context to answer the question."
-    "\n\nContext:\n{context}\n\nQuestion: {question}\nAnswer in Markdown."
-)
-
 
 class LightRAG:
     """
@@ -960,15 +993,27 @@ class LightRAG:
             self._chat,
             question,
             conversation_history,
-            settings.retrieval.graph_depth,  # reusing as history_turns
-        )
-
-        # TODO: Mode resetting changes based on keywords presence
-        # Handle empty keywords (check lightrag's operate.py for kg_query
-        # after the call of get_keywords_from_query)
-    
+            settings.retrieval.history_turns
+        )    
 
         LOGGER.debug(f"Extracted keywords - HL: {hl_keywords}, LL: {ll_keywords}")
+        retrieval_mode = settings.retrieval.light_mode
+        # Handle empty keywords
+        if hl_keywords == [] and ll_keywords == []:
+            LOGGER.warning("low_level_keywords and high_level_keywords is empty")
+            return PROMPTS["fail_response"]
+        if ll_keywords == [] and retrieval_mode in ["local", "hybrid"]:
+            LOGGER.warning(
+                "low_level_keywords is empty, switching from %s mode to global mode",
+                retrieval_mode,
+            )
+            retrieval_mode = "global"
+        if hl_keywords == [] and retrieval_mode in ["global", "hybrid"]:
+            LOGGER.warning(
+                "high_level_keywords is empty, switching from %s mode to local mode",
+                retrieval_mode,
+            )
+            retrieval_mode = "local"
 
         # 2-4) Build context
         entities_context, relations_context, all_chunks = build_context(
@@ -976,6 +1021,7 @@ class LightRAG:
             question,
             hl_keywords,
             ll_keywords,
+            retrieval_mode=retrieval_mode,
             top_k_entities=settings.retrieval.entity_top_k,
             top_k_relations=settings.retrieval.relation_top_k,
             top_k_chunks=settings.retrieval.chunk_top_k,
@@ -983,13 +1029,6 @@ class LightRAG:
         )
 
         # Format context for prompt
-        # TODO: check if needed
-        context_block = format_context_for_prompt(
-            entities_context,
-            relations_context,
-            all_chunks,
-        )
-        
         lightrag_sys_prompt = lightrag_prompt(
             entities_context=entities_context,
             relations_context=relations_context,
@@ -998,9 +1037,9 @@ class LightRAG:
         )
 
         # Generate answer
-        #prompt = RAG_PROMPT.format(context=context_block, question=question)
-        answer = await self._chat.generate(
-            lightrag_sys_prompt,
+        chat = RetrieveChat(system_prompt=lightrag_sys_prompt)
+        answer = await chat.generate(
+            prompt=question,
             max_tokens=settings.retrieval.llm_max_tokens,
             temperature=settings.retrieval.llm_temperature,
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -716,6 +717,56 @@ def format_windows_for_prompt(windows: Iterable[ContextWindow]) -> str:
     return join_non_empty(blocks, delimiter="\n\n")
 
 
+def build_context_for_prompt(
+    context_windows: Sequence["ContextWindow"],
+    entity_matches: Sequence["EntityMatch"],
+    relation_matches: Sequence["RelationMatch"],
+    chunk_matches: Sequence["ChunkMatch"],
+) -> str:
+    """
+    Build a JSON payload summarising context windows and raw matches for the prompt.
+    """
+    payload: Dict[str, Any] = {
+        "context_windows": [
+            {
+                "label": w.label,
+                "text": w.text,
+                "score": w.score,
+            }
+            for w in context_windows
+        ],
+        "entity_matches": [
+            {
+                "name": e.name,
+                "type": e.type,
+                "description": e.description,
+                "score": e.score,
+            }
+            for e in entity_matches
+        ],
+        "relation_matches": [
+            {
+                "source_name": r.source_name,
+                "target_name": r.target_name,
+                "description": r.description,
+                "keywords": r.keywords,
+                "score": r.score,
+            }
+            for r in relation_matches
+        ],
+        "chunk_matches": [
+            {
+                "chunk_uuid": c.chunk_uuid,
+                "document_id": c.document_id,
+                "filename": c.filename,
+                "text": c.text,
+                "score": c.score,
+            }
+            for c in chunk_matches
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
 # ---------------------------------------------------------------------------
 # Prompt template
 # ---------------------------------------------------------------------------
@@ -754,13 +805,29 @@ class PathRAG:
     # ------------------------------------------------------------------
     # Retrieval entry points
     # ------------------------------------------------------------------
-    async def aretrieve(self, question: str) -> RetrievalResult:
+    # ------------------------------------------------------------------
+    # Retrieval entry points
+    # ------------------------------------------------------------------
+    async def aretrieve(
+        self,
+        question: str,
+        conversation_history: Optional[List[Tuple[str, str]]] = None,
+    ) -> RetrievalResult:
         # TODO: add conversation history support. LightRAG first extracts keywords from history, then uses last n turns in system prompt.
         LOGGER.info("Running retrieval for query: %s", question)
 
-        entity_matches = self._storage.query_entities(question, limit=settings.retrieval.entity_top_k)
-        relation_matches = self._storage.query_relations(question, limit=settings.retrieval.relation_top_k)
-        chunk_matches = self._storage.query_chunks(question, limit=settings.retrieval.chunk_top_k)
+        entity_matches = self._storage.query_entities(
+            question,
+            limit=settings.retrieval.entity_top_k,
+        )
+        relation_matches = self._storage.query_relations(
+            question,
+            limit=settings.retrieval.relation_top_k,
+        )
+        chunk_matches = self._storage.query_chunks(
+            question,
+            limit=settings.retrieval.chunk_top_k,
+        )
 
         def build_global_windows(
             adapter: "StorageAdapter",
@@ -790,7 +857,7 @@ class PathRAG:
                 label_prefix="global::",
             )
             return path_windows
-        
+
         def build_local_windows(
             adapter: "StorageAdapter",
             seeds: Sequence["EntityMatch"],
@@ -813,7 +880,7 @@ class PathRAG:
                     model=settings.retrieval.tiktoken_model,
                     label_prefix="local::",
                 )
-                
+
             if settings.retrieval.use_local_graph and seeds:
                 local_windows += build_graph_windows(
                     adapter,
@@ -831,15 +898,38 @@ class PathRAG:
         global_windows = build_global_windows(self._storage, entity_matches)
 
         # Assemble local context windows
-        local_windows = build_local_windows(self._storage, entity_matches, chunk_matches)
+        local_windows = build_local_windows(
+            self._storage,
+            entity_matches,
+            chunk_matches,
+        )
 
-        # Merge and format for prompt
+        # Merge windows
         context_windows = global_windows + local_windows
-        context_block = format_windows_for_prompt(context_windows)
 
-        # TODO: support chat history
-        # TODO: Change the prompt to match the lightrag style
-        prompt = RAG_PROMPT.format(context=context_block, question=question)
+        # Build JSON context for the prompt
+        context_data = build_context_for_prompt(
+            context_windows=context_windows,
+            entity_matches=entity_matches,
+            relation_matches=relation_matches,
+            chunk_matches=chunk_matches,
+        )
+
+        # Render conversation history (up to N turns, default 10)
+        history_text = render_history(
+            conversation_history,
+            max_turns=getattr(settings.retrieval, "path_history_turns", 10),
+        )
+
+        # Build system prompt using the dedicated PathRAG template
+        sys_prompt_template = PROMPTS["pathrag_response"]
+        prompt = sys_prompt_template.format(
+            context_data=context_data,
+            response_type=settings.retrieval.response_type,
+            history=history_text,
+            user_prompt=question,
+        )
+
         answer = await self._chat.generate(
             prompt,
             max_tokens=settings.retrieval.llm_max_tokens,
@@ -853,13 +943,17 @@ class PathRAG:
             chunk_matches=chunk_matches,
         )
 
-    def retrieve(self, question: str) -> RetrievalResult:
+    def retrieve(
+        self,
+        question: str,
+        conversation_history: Optional[List[Tuple[str, str]]] = None,
+    ) -> RetrievalResult:
         """Synchronous helper that creates an event loop if needed."""
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.aretrieve(question))
+            return asyncio.run(self.aretrieve(question, conversation_history))
         else:  # pragma: no cover - usage depends on embedding application
             raise RuntimeError(
                 "retrieve() cannot be used when an event loop is already running. "

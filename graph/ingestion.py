@@ -446,6 +446,203 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
 
     return affected
 
+def remove_document_from_storage(storage: Storage, filename: str) -> None:
+    """
+    Removes a document and all its associated data from storage.
+
+    This function performs a comprehensive cleanup across all storage layers:
+    1. DocumentsDB: Removes the document record
+    2. ChunksDB: Removes all chunks associated with the document
+    3. GraphDB: Updates nodes and edges by removing chunk UUIDs from source_id fields,
+       and deletes nodes/edges that have no remaining source_ids
+    4. ChunkVectors: Removes chunk embeddings from the vector database
+    5. EntityVectors: Updates entity source_ids and removes entities with no remaining sources
+    6. RelationVectors: Updates relation source_ids and removes relations with no remaining sources
+
+    Args:
+        storage (Storage): The storage instance.
+        filename (str): The filename of the document to remove.
+    """
+    # Get the document to retrieve its doc_id
+    doc = storage.get_document_by_filename(filename)
+    if not doc or not doc.get("doc_id"):
+        print(f"Document {filename} not found in storage.")
+        return
+
+    doc_id = doc["doc_id"]
+    print(f"Removing document: {filename} (doc_id: {doc_id})")
+
+    # Step 1: Get all chunks associated with this document
+    chunks = storage.get_chunks_by_doc_id(doc_id)
+    if not chunks:
+        print(f"No chunks found for document {filename}")
+        # Still proceed to delete the document itself
+        storage.delete_document(doc_id)
+        return
+
+    chunk_uuids = [c["chunk_uuid"] for c in chunks]
+    print(f"Found {len(chunk_uuids)} chunks to process")
+
+    # Step 2: Process GraphDB - update nodes and edges
+    delim = settings.ingestion.delimiter
+    nodes_to_update: List[Dict[str, Any]] = []
+    nodes_to_delete: List[str] = []
+    edges_to_update: List[Dict[str, Any]] = []
+    edges_to_delete: List[Tuple[str, str]] = []
+
+    nodes = storage.get_nodes_by_chunk_uuids(chunk_uuids)
+    edges = storage.get_edges_by_chunk_uuids(chunk_uuids)
+
+    # Remove duplicates if any due to multiple chunks referencing same nodes/edges
+    nodes = [v for _,v in {n["name"]: n for n in nodes}.items()]
+    edges = [v for _,v in {(e["source_name"], e["target_name"]): e for e in edges}.items()]
+    
+    # make source_id a list for easier processing
+    nodes = [ {k: v if k != "source_id" else (v or "").split(delim) for k,v in n.items()} 
+            for n in nodes]
+    edges = [ {k: v if k != "source_id" else (v or "").split(delim) for k,v in e.items()} 
+            for e in edges]
+    
+    # One to one mapping of counts for each node/edge to chunk_uuids
+    # This will help to decide to update or delete 
+    node_has_n_uuids = defaultdict(lambda: {"count": 0, "uuids": []})
+    edge_has_n_uuids = defaultdict(lambda: {"count": 0, "uuids": []})
+
+
+    for chunk_uuid in chunk_uuids:
+        for n in nodes:
+            if chunk_uuid in n.get("source_id", []):
+                node_has_n_uuids[n["name"]]["count"] += 1
+                node_has_n_uuids[n["name"]]["uuids"].append(chunk_uuid)
+        for e in edges:
+            if chunk_uuid in e.get("source_id", []):
+                edge_pair = (e["source_name"], e["target_name"])
+                edge_has_n_uuids[edge_pair]["count"] += 1
+                edge_has_n_uuids[edge_pair]["uuids"].append(chunk_uuid)
+    
+    for n in nodes:
+        n["remaining_source_ids"] = len(n.get("source_id", [])) - node_has_n_uuids[n["name"]]["count"]
+
+    for e in edges:
+        edge_pair = (e["source_name"], e["target_name"])
+        e["remaining_source_ids"] = len(e.get("source_id", [])) - edge_has_n_uuids[edge_pair]["count"]
+
+    # Query nodes
+    for n in nodes:
+        name = n["name"]
+        if n["remaining_source_ids"] < 0:
+            print(f"Warning: Node {name} has negative remaining_source_ids")
+        elif n["remaining_source_ids"] == 0:
+            nodes_to_delete.append(name)
+        else:
+            # Update source_id by removing chunk_uuids
+            new_source_ids = [s for s in n.get("source_id", []) if s not in chunk_uuids]
+            new_source_id_str = delim.join(new_source_ids)
+            nodes_to_update.append({
+                "name": name,
+                "type": n.get("type", ""),
+                "description": n.get("description", ""),
+                "source_id": new_source_id_str,
+                "filepath": n.get("filepath", ""),
+            })
+
+    # Query edges
+    for e in edges:
+        edge_pair = (e["source_name"], e["target_name"])
+        if e["remaining_source_ids"] < 0:
+            print(f"Warning: Edge {edge_pair} has negative remaining_source_ids")
+        elif e["remaining_source_ids"] == 0:
+            edges_to_delete.append(edge_pair)
+        else:
+            # Update source_id by removing chunk_uuids
+            new_source_ids = [s for s in e.get("source_id", []) if s not in chunk_uuids]
+            new_source_id_str = delim.join(new_source_ids)
+            edges_to_update.append({
+                "source_name": e["source_name"],
+                "target_name": e["target_name"],
+                "weight": e.get("weight", 0),
+                "description": e.get("description", ""),
+                "keywords": e.get("keywords", ""),
+                "source_id": new_source_id_str,
+                "filepath": e.get("filepath", ""),
+            })
+
+    # Apply graph updates
+    if nodes_to_update:
+        print(f"Updating {len(nodes_to_update)} nodes with source_id changes")
+        storage.graphdb.update_nodes(nodes_to_update)
+
+    if nodes_to_delete:
+        print(f"Deleting {len(nodes_to_delete)} nodes with no remaining source_ids")
+        storage.delete_nodes(nodes_to_delete)
+
+    if edges_to_update:
+        print(f"Updating {len(edges_to_update)} edges with source_id changes")
+        storage.graphdb.update_edges(edges_to_update)
+
+    if edges_to_delete:
+        print(f"Deleting {len(edges_to_delete)} edges with no remaining source_ids")
+        storage.delete_edges(edges_to_delete)
+
+    # Step 3: Update EntityVectors - remove source_ids and delete if empty
+    # We need to get all entities and check their metadata
+    # Since we deleted nodes, we also need to delete their vectors
+    if nodes_to_delete:
+        print(f"Removing {len(nodes_to_delete)} entity vectors")
+        storage.delete_entity_vector(nodes_to_delete)
+
+    # For updated nodes, we need to upsert them in the vector DB
+    if nodes_to_update:
+        print(f"Updating {len(nodes_to_update)} entity vectors")
+        storage.upsert_entity_vector(nodes_to_update)
+
+    # Step 4: Update RelationVectors - remove source_ids and delete if empty
+    if edges_to_delete:
+        print(f"Removing {len(edges_to_delete)} relation vectors")
+        storage.delete_relation_vector(edges_to_delete)
+
+    # For updated edges, we need to upsert them in the vector DB
+    if edges_to_update:
+        print(f"Updating {len(edges_to_update)} relation vectors")
+        storage.upsert_relation_vector(edges_to_update)
+
+    # Step 5: Remove chunk vectors
+    print(f"Removing {len(chunk_uuids)} chunk vectors")
+    for chunk_uuid in chunk_uuids:
+        storage.delete_chunk_vector(chunk_uuid)
+
+    # Step 6: Remove chunks from ChunksDB
+    print(f"Removing {len(chunk_uuids)} chunks from ChunksDB")
+    storage.delete_chunks_by_uuids(chunk_uuids)
+
+    # Step 7: Remove document from DocumentsDB
+    print("Removing document from DocumentsDB")
+    storage.delete_document(doc_id)
+
+    # Step 8: Sanity check
+    # If a node removed and if the edge is still there, that is a problem
+    # But the other way around is fine (edge removed but node exists)
+    # The latter might lead to orphan nodes, which is acceptable for now
+    # we will apply cross check with set operations by looking at all edges and nodes again
+    all_doc_ids = {d["doc_id"] for d in storage.get_all_documents() if d.get("doc_id")}
+    all_chunks = []
+    for d in all_doc_ids:
+        chs = storage.get_chunks_by_doc_id(d)
+        all_chunks.extend(chs or [])
+    all_chunk_uuids = [c["chunk_uuid"] for c in all_chunks if c.get("chunk_uuid")]
+    nodes_after = storage.get_nodes_by_chunk_uuids(all_chunk_uuids)
+    edges_after = storage.get_edges_by_chunk_uuids(all_chunk_uuids)
+    node_names_after = {n["name"] for n in nodes_after if n.get("name")}
+    for e in edges_after:
+        src, tgt = e.get("source_name"), e.get("target_name")
+        if src not in node_names_after or tgt not in node_names_after:
+            print(f"Sanity Check Warning: Edge ({src}, {tgt}) exists without corresponding nodes after deletion.")
+            storage.delete_edges( [(src, tgt)] )
+            storage.delete_relation_vector( [(src, tgt)] )
+            print(f"Removed edge ({src}, {tgt}) due to missing nodes.")
+
+    print(f"Successfully removed document {filename} and all associated data")
+
 
 def ingest_paths(paths: List[Path]):
     """
@@ -467,6 +664,13 @@ def ingest_paths(paths: List[Path]):
     all_entities: List[Dict[str, Any]]  = []
     all_relations: List[Dict[str, Any]]  = []
 
+    # Remove documents that are no longer present
+    all_existing_docs = storage.get_all_documents()
+    existing_filenames = {doc["filename"] for doc in all_existing_docs if doc.get("filename")}
+    files_to_be_removed = existing_filenames - {p.name for p in paths}
+    for fname in files_to_be_removed:
+        remove_document_from_storage(storage, fname)
+
     for p in paths:
         if not p.exists() or not p.is_file():
             continue
@@ -479,11 +683,13 @@ def ingest_paths(paths: List[Path]):
             (p.name.lower().endswith((".tmp", ".temp")) and "word" in p.name.lower())):
             print(f"Skipping temporary file {p.name}.")
             continue
-
         pages, file_meta = parse_to_pages(p)
         if not pages or not file_meta:
             print(f"Skipping {p} due to parsing error.")
             continue
+        doc_exists = storage.get_document_by_filename(p.name).get("filename") == p.name if storage.get_document_by_filename(p.name) else False
+        if doc_exists: # document exists but content hash differs.
+            remove_document_from_storage(storage, p.name)
 
         file_meta = normalize_metadata(file_meta)
         full_text = "\n".join([page[1] for page in pages])

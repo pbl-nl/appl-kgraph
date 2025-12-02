@@ -570,7 +570,7 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
     # Apply graph updates
     if nodes_to_update:
         print(f"Updating {len(nodes_to_update)} nodes with source_id changes")
-        storage.graph.update_nodes(nodes_to_update)
+        storage.graphdb.update_nodes(nodes_to_update)
 
     if nodes_to_delete:
         print(f"Deleting {len(nodes_to_delete)} nodes with no remaining source_ids")
@@ -578,7 +578,7 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
 
     if edges_to_update:
         print(f"Updating {len(edges_to_update)} edges with source_id changes")
-        storage.graph.update_edges(edges_to_update)
+        storage.graphdb.update_edges(edges_to_update)
 
     if edges_to_delete:
         print(f"Deleting {len(edges_to_delete)} edges with no remaining source_ids")

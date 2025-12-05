@@ -183,7 +183,7 @@ class StorageAdapter:
         """Load graph from storage into NetworkX."""
         graph = nx.Graph()
 
-        with self._storage.graph.connect() as con:
+        with self._storage.graphdb.connect() as con:
             node_rows = con.execute(
                 "SELECT name, type, description, source_id, filepath FROM nodes;"
             ).fetchall()
@@ -334,12 +334,12 @@ class StorageAdapter:
 
     def get_chunk_by_uuid(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
         """Get a single chunk by its UUID from the database."""
-        chunks = self._storage.chunks.get_chunk_by_uuid(chunk_uuid)
+        chunks = self._storage.chunksdb.get_chunk_by_uuid(chunk_uuid)
         return chunks[0] if chunks else None
 
     def get_chunks_by_uuids(self, chunk_uuids: List[str]) -> Dict[str, Dict[str, Any]]:
         """Get multiple chunks by their UUIDs from the database."""
-        chunks = self._storage.chunks.get_chunks_by_uuids(chunk_uuids)
+        chunks = self._storage.chunksdb.get_chunks_by_uuids(chunk_uuids)
         return {c["chunk_uuid"]: c for c in chunks}
 
     @staticmethod

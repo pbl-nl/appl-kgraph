@@ -252,6 +252,7 @@ class RetrievalSettings:
     rerank_top_k: int = 20
     enable_rerank: bool = True
     rerank_cache_dir: str = "./flashrank_model"  # directory for FlashRank model cache
+    rerank_model_name: str = "ms-marco-MultiBERT-L-12"  # model name for reranking
     truncate_chunks: bool = False  # whether to truncate chunks by token limit
 
 
@@ -411,6 +412,7 @@ def load_settings() -> Settings:
         enable_rerank = env_bool("RETRIEVAL_ENABLE_RERANK", True),
         rerank_top_k = env_int("RETRIEVAL_RERANK_TOP_K", 20),
         rerank_cache_dir = env_str("RETRIEVAL_RERANK_CACHE_DIR", "./flashrank_model"),
+        rerank_model_name = env_str("RETRIEVAL_RERANK_MODEL_NAME", "ms-marco-MultiBERT-L-12"),
         truncate_chunks = env_bool("RETRIEVAL_TRUNCATE_CHUNKS", False),
     )
 

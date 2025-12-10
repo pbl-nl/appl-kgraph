@@ -778,8 +778,11 @@ def rerank(
     if not retrieved_docs:
         return []
     
-    # Initialize ranker (lightweight model)
-    ranker = Ranker(cache_dir=settings.retrieval.rerank_cache_dir)
+    # Initialize ranker
+    ranker = Ranker(
+        model_name=settings.retrieval.rerank_model_name,
+        cache_dir=settings.retrieval.rerank_cache_dir
+    )
     
     # Create rerank request
     rerank_request = RerankRequest(
@@ -900,10 +903,10 @@ def build_context(
             )
 
     # Truncate chunk text by chunk_window_tokens
-    if settings.retrieval.truncate_chunks and settings.retrieval.chunk_window_tokens > 0:
-        model = settings.retrieval.tiktoken_model
-        deduplicated_chunks = truncate_by_tokens(deduplicated_chunks, settings.retrieval.chunk_window_tokens, model)
-        print(f"Truncated chunks: kept {len(deduplicated_chunks)} chunks after truncation")
+    # if settings.retrieval.truncate_chunks and settings.retrieval.chunk_window_tokens > 0:
+    #     model = settings.retrieval.tiktoken_model
+    #     deduplicated_chunks = truncate_by_tokens(deduplicated_chunks, settings.retrieval.chunk_window_tokens, model)
+    #     print(f"Truncated chunks: kept {len(deduplicated_chunks)} chunks after truncation")
     
 
     return entities_context, relations_context, deduplicated_chunks

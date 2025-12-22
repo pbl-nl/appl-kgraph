@@ -92,16 +92,16 @@ def count_tokens(text: str, model: str) -> int:
     return len(_encoder(model).encode(text))
 
 
-def truncate_by_tokens(list_dict: List[Dict[str, Any]], max_tokens: int, model: str) -> List[Dict[str, Any]]:
-    if max_tokens <= 0:
-        return []
-    tokens = 0
-    for i, item in enumerate(list_dict):
-        item_tokens = count_tokens(str(item), model)
-        tokens += item_tokens
-        if tokens > max_tokens:
-            return list_dict[:i]
-    return list_dict
+# def truncate_by_tokens(list_dict: List[Dict[str, Any]], max_tokens: int, model: str) -> List[Dict[str, Any]]:
+#     if max_tokens <= 0:
+#         return []
+#     tokens = 0
+#     for i, item in enumerate(list_dict):
+#         item_tokens = count_tokens(str(item), model)
+#         tokens += item_tokens
+#         if tokens > max_tokens:
+#             return list_dict[:i]
+#     return list_dict
 
 
 def join_non_empty(parts: Iterable[str], delimiter: str = "\n") -> str:
@@ -1006,16 +1006,10 @@ class LightRAG:
             LOGGER.warning("low_level_keywords and high_level_keywords is empty")
             return PROMPTS["fail_response"]
         if ll_keywords == [] and retrieval_mode in ["local", "hybrid"]:
-            LOGGER.warning(
-                "low_level_keywords is empty, switching from %s mode to global mode",
-                retrieval_mode,
-            )
+            LOGGER.warning(f"low_level_keywords is empty, switching from {retrieval_mode} mode to global mode")
             retrieval_mode = "global"
         if hl_keywords == [] and retrieval_mode in ["global", "hybrid"]:
-            LOGGER.warning(
-                "high_level_keywords is empty, switching from %s mode to local mode",
-                retrieval_mode,
-            )
+            LOGGER.warning(f"high_level_keywords is empty, switching from {retrieval_mode} mode to local mode")
             retrieval_mode = "local"
 
         # 2-4) Build context

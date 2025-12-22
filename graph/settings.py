@@ -225,6 +225,7 @@ class RetrievalSettings:
     tiktoken_model: str = "gpt-4o-mini"  # for token counting
     llm_max_tokens: int = 512
     llm_temperature: float = 0.0
+    history_turns: int = 4
 
     # --- Hybrid/global (i.e. do we use paths & relations?) ---
     hybrid_use_paths_for_global: bool = True # whether to build global context from paths
@@ -246,8 +247,13 @@ class RetrievalSettings:
     path_window_tokens: int = 512    # tokens per path window
 
     # --- LightRAG-specific retrieval settings ---
-    light_mode: str = "mix"       # 'local', 'global', 'hybrid', 'mix' # TODO: Implement 'naive' to the light mode
-    response_type: str = "Multiple Paragraphs" #'Multiple Paragraphs', 'Single Paragraph'
+    light_mode: str = "mix"       # 'local', 'global', 'hybrid', 'mix', 'naive'
+    response_type: str = "Single Paragraph" #'Multiple Paragraphs', 'Single Paragraph'
+    rerank_top_k: int = 20
+    enable_rerank: bool = True
+    rerank_cache_dir: str = "./flashrank_model"  # directory for FlashRank model cache
+    rerank_model_name: str = "ms-marco-MultiBERT-L-12"  # model name for reranking
+    truncate_chunks: bool = False  # whether to truncate chunks by token limit
 
 
 @dataclass(frozen=True)
@@ -383,6 +389,7 @@ def load_settings() -> Settings:
         tiktoken_model = env_str("RETRIEVAL_TIKTOKEN_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
         llm_max_tokens = env_int("RETRIEVAL_LLM_MAX_TOKENS", 512),
         llm_temperature = env_float("RETRIEVAL_LLM_TEMPERATURE", 0.0),
+        history_turns= env_int("RETRIEVAL_HISTORY_TURNS", 4),
         # Hybrid/global
         hybrid_use_paths_for_global = env_bool("RETRIEVAL_HYBRID_USE_PATHS_FOR_GLOBAL", True),
         hybrid_use_relations_for_global = env_bool("RETRIEVAL_HYBRID_USE_RELATIONS_FOR_GLOBAL", False),
@@ -400,8 +407,13 @@ def load_settings() -> Settings:
         path_max_windows = env_int("RETRIEVAL_PATH_MAX_WINDOWS", 5),
         path_window_tokens = env_int("RETRIEVAL_PATH_WINDOW_TOKENS", 512),
         # LightRAG-specific
-        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "hybrid"),
-        response_type = env_str("RETRIEVAL_RESPONSE_TYPE", "Multiple Paragraphs"),
+        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "mix"),
+        response_type = env_str("RETRIEVAL_RESPONSE_TYPE", "Single Paragraphs"),
+        enable_rerank = env_bool("RETRIEVAL_ENABLE_RERANK", True),
+        rerank_top_k = env_int("RETRIEVAL_RERANK_TOP_K", 20),
+        rerank_cache_dir = env_str("RETRIEVAL_RERANK_CACHE_DIR", "./flashrank_model"),
+        rerank_model_name = env_str("RETRIEVAL_RERANK_MODEL_NAME", "ms-marco-MultiBERT-L-12"),
+        truncate_chunks = env_bool("RETRIEVAL_TRUNCATE_CHUNKS", False),
     )
 
     return Settings(

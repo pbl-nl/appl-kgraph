@@ -399,7 +399,7 @@ class StorageAdapter:
     def _load_graph(self) -> GraphSnapshot:
         graph = nx.Graph()
 
-        with self._storage.graph.connect() as con:
+        with self._storage.graphdb.connect() as con:
             node_rows = con.execute(
                 "SELECT name, type, description, source_id, filepath FROM nodes;"
             ).fetchall()

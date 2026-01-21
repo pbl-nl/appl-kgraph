@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import fitz
+import time
 import mimetypes
 from pathlib import Path
 from docx2pdf import convert
@@ -217,6 +218,10 @@ class FileParser:
         folder, file = os.path.split(docx_path)
         pdf_file = file + '.pdf'
         pdf_path = os.path.join(folder, pdf_file)
+        
+        # Ensure word app is not running
+        os.system("taskkill /f /im WINWORD.EXE 2>nul")
+        time.sleep(2)  # Give it time to close
         convert(input_path=docx_path, output_path=pdf_path, keep_active=False)
 
         return pdf_path

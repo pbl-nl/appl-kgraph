@@ -26,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.DS_Store
 
 # PyInstaller
 *.manifest
@@ -78,6 +79,7 @@ config.py
 storage/
 logs/
 *.log
+flashrank_model/
 
 # Git directory
 .git

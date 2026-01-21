@@ -184,6 +184,10 @@ class DocumentsDB:
                 documents.append(dict(zip(self.KEYS, row)))
             return documents
 
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """Alias for list_documents for backward compatibility."""
+        return self.list_documents()
+
     def delete_document(self, doc_id: str) -> None:
         with self.connect() as con:
             con.execute("DELETE FROM documents WHERE doc_id = ?;", (doc_id,))
@@ -491,6 +495,27 @@ class GraphDB:
             ''', tuple(names))
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
+    
+
+    def get_nodes_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        if not chunk_uuids:
+            return []
+        results = []
+        with self.connect() as con:
+            # Find all nodes that contain any of our chunk_uuids in their source_id
+            for chunk_uuid in chunk_uuids:
+                # Query nodes
+                cur = con.cursor()
+                cur.execute("""
+                    SELECT name, type, description, source_id, filepath
+                    FROM nodes
+                    WHERE source_id LIKE ?
+                """, (f"%{chunk_uuid}%",))
+                rows = cur.fetchall()
+                keys = [k for k in self.KEYS_NODE if k != "id"]
+                results.extend([dict(zip(keys, row)) for row in rows] if rows else [])
+
+        return results
 
     def delete_node(self, name: str) -> None:
         """
@@ -596,6 +621,26 @@ class GraphDB:
             ''', tuple(flat_params))
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
+        
+    def get_edges_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        if not chunk_uuids:
+            return []
+        results = []
+        with self.connect() as con:
+            # Find all edges that contain any of our chunk_uuids in their source_id
+            for chunk_uuid in chunk_uuids:
+                # Query edges
+                cur = con.cursor()
+                cur.execute("""
+                    SELECT source_name, target_name, weight, description, keywords, source_id, filepath
+                    FROM edges
+                    WHERE source_id LIKE ?
+                """, (f"%{chunk_uuid}%",))
+                rows = cur.fetchall()
+                keys = [k for k in self.KEYS_EDGE if k not in {"id", "u_source_name", "u_target_name"}]
+                results.extend([dict(zip(keys, row)) for row in rows] if rows else [])
+
+        return results
         
     def delete_edge(self, source_name: str, target_name: str) -> None:
         u_src, u_tgt = _normalize_pair(source_name, target_name)
@@ -971,9 +1016,9 @@ class Storage:
             paths = replace(settings.storage)
 
         # Schema DBs
-        self.documents = DocumentsDB(paths.documents_db)
-        self.chunks = ChunksDB(paths.chunks_db)
-        self.graph = GraphDB(paths.graph_db)
+        self.documentsdb = DocumentsDB(paths.documents_db)
+        self.chunksdb = ChunksDB(paths.chunks_db)
+        self.graphdb = GraphDB(paths.graph_db)
 
         # Embedder (shared)
         self.embedder = embedder or Embedder()
@@ -985,32 +1030,32 @@ class Storage:
 
     def init(self):
         """Create tables/collections if they don't exist yet."""
-        self.documents.init()
-        self.chunks.init()
-        self.graph.init()
+        self.documentsdb.init()
+        self.chunksdb.init()
+        self.graphdb.init()
 
     def get_llm_cache(self, model: str, prompt_sha: str, text_sha: str, max_age_hours: int) -> Optional[str]:
-        return self.documents.get_llm_cache(model, prompt_sha, text_sha, max_age_hours)
+        return self.documentsdb.get_llm_cache(model, prompt_sha, text_sha, max_age_hours)
 
     def put_llm_cache(self, model: str, prompt_sha: str, text_sha: str, result: str) -> None:
-        self.documents.put_llm_cache(model, prompt_sha, text_sha, result)
+        self.documentsdb.put_llm_cache(model, prompt_sha, text_sha, result)
 
     # ---------- Add-only APIs ----------
 
     # 1) Documents schema
     def add_document(self, metadata: Dict[str, Any], full_text: str) -> None:
-        self.documents.add_document(metadata, full_text)
+        self.documentsdb.add_document(metadata, full_text)
 
     # 2) Chunks schema
     def add_chunks(self, chunks: Sequence[Dict[str, Any]]) -> None:
-        self.chunks.add_chunks(chunks)
+        self.chunksdb.add_chunks(chunks)
 
     # 3) Knowledge Graph schema
     def add_kg_nodes(self, nodes: List[Dict[str, Any]]) -> None:
-        self.graph.add_nodes(nodes)
+        self.graphdb.add_nodes(nodes)
 
     def add_kg_edges(self, edges: List[Dict[str, Any]]) -> None:
-        self.graph.add_edges(edges)
+        self.graphdb.add_edges(edges)
 
     # 4) Chunk vectors
     def add_chunk_vectors(self, chunks: Sequence[Dict[str, Any]]) -> None:
@@ -1040,42 +1085,52 @@ class Storage:
 
     # 1) Documents
     def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
-        return self.documents.get_document(doc_id)
+        return self.documentsdb.get_document(doc_id)
     
     def get_document_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
-        return self.documents.get_document_by_filename(filename)
+        return self.documentsdb.get_document_by_filename(filename)
     
     def list_documents(self) -> List[Dict[str, Any]]:
-        return self.documents.list_documents()
+        return self.documentsdb.list_documents()
+
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """Alias for list_documents for backward compatibility."""
+        return self.documentsdb.get_all_documents()
 
     # 2) Chunks
     def get_chunks_by_doc_id(self, doc_id: str) -> List[Dict[str, Any]]:
-        return self.chunks.get_chunks_by_doc_id(doc_id)
+        return self.chunksdb.get_chunks_by_doc_id(doc_id)
     
     def get_chunks_by_filename(self, filename: str) -> List[Dict[str, Any]]:
-        return self.chunks.get_chunks_by_filename(filename)
+        return self.chunksdb.get_chunks_by_filename(filename)
 
     def get_chunk_by_uuid(self, chunk_uuid: str) -> List[Dict[str, Any]]:
-        return self.chunks.get_chunk_by_uuid(chunk_uuid)
+        return self.chunksdb.get_chunk_by_uuid(chunk_uuid)
 
     def get_chunks_by_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
-        return self.chunks.get_chunks_by_uuids(chunk_uuids)
+        return self.chunksdb.get_chunks_by_uuids(chunk_uuids)
     
     # 3) Graph
     def get_node(self, name: str) -> Optional[Dict[str, Any]]:
         """
         Pass-through: fetch one graph node by name.
         """
-        return self.graph.get_node(name)
+        return self.graphdb.get_node(name)
 
     def get_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
-        return self.graph.get_nodes(names)
+        return self.graphdb.get_nodes(names)
+    
+    def get_nodes_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        return self.graphdb.get_nodes_by_chunk_uuids(chunk_uuids)
 
     def get_edge(self, source_name: str, target_name: str) -> Optional[Dict[str, Any]]:
-        return self.graph.get_edge(source_name, target_name)
+        return self.graphdb.get_edge(source_name, target_name)
 
     def get_edges(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
-        return self.graph.get_edges(pairs)
+        return self.graphdb.get_edges(pairs)
+    
+    def get_edges_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
+        return self.graphdb.get_edges_by_chunk_uuids(chunk_uuids)
 
     # 4) Chunk Vectors
     def get_chunk_vector(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
@@ -1100,36 +1155,36 @@ class Storage:
 
     # 1) Documents
     def delete_document(self, doc_id: str) -> None:
-        self.documents.delete_document(doc_id)
+        self.documentsdb.delete_document(doc_id)
 
     # 2) Chunks
     def delete_chunks_by_doc_id(self, doc_id: str) -> None:
-        self.chunks.delete_chunks_by_doc_id(doc_id)
+        self.chunksdb.delete_chunks_by_doc_id(doc_id)
 
     def delete_chunk_by_uuid(self, chunk_uuid: str) -> None:
-        self.chunks.delete_chunk_by_uuid(chunk_uuid)
+        self.chunksdb.delete_chunk_by_uuid(chunk_uuid)
 
     def delete_chunks_by_uuids(self, chunk_uuids: List[str]) -> None:
-        self.chunks.delete_chunks_by_uuids(chunk_uuids)
+        self.chunksdb.delete_chunks_by_uuids(chunk_uuids)
 
     # 3) Graph
     def delete_node(self, name: str) -> None:
         """
         Pass-through: delete one graph node by name.
         """
-        self.graph.delete_node(name)
+        self.graphdb.delete_node(name)
 
     def delete_nodes(self, names: List[str]) -> None:
         """
         Pass-through: bulk delete graph nodes by name.
         """
-        self.graph.delete_nodes(names)
+        self.graphdb.delete_nodes(names)
 
     def delete_edge(self, source_name: str, target_name: str) -> None:
-        self.graph.delete_edge(source_name, target_name)
+        self.graphdb.delete_edge(source_name, target_name)
 
     def delete_edges(self, pairs: List[Tuple[str, str]]) -> None:
-        self.graph.delete_edges(pairs)
+        self.graphdb.delete_edges(pairs)
 
     # 4) Chunk Vectors
     def delete_chunk_vector(self, chunk_uuid: str) -> None:
@@ -1152,15 +1207,15 @@ class Storage:
 
     # 1) Documents
     def upsert_document(self, doc_id: str, updates: Dict[str, Any]) -> None:
-        self.documents.update_document(doc_id, updates)
+        self.documentsdb.update_document(doc_id, updates)
 
     # 2) Chunks
     def upsert_chunk(self, chunk_uuid: str, updates: Dict[str, Any]) -> None:
-        self.chunks.update_chunk(chunk_uuid, updates)
+        self.chunksdb.update_chunk(chunk_uuid, updates)
 
     # 3) Graph
     def upsert_node(self, name: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_node(name, updates)
+        self.graphdb.update_node(name, updates)
 
     def upsert_nodes(self, updates_list: List[Dict[str, Any]]) -> None:
         """
@@ -1172,7 +1227,7 @@ class Storage:
             return
         # Bulk fetch all names once, then test membership
         names = sorted({u["name"] for u in updates_list})
-        existing = self.graph.get_nodes(names) if names else []
+        existing = self.graphdb.get_nodes(names) if names else []
         existing_names = {row["name"] for row in existing}
         for upd in updates_list:
             name = upd.get("name")
@@ -1189,26 +1244,26 @@ class Storage:
                     "filepath": (upd.get("filepath") or ""),
                 })
         if to_add:
-            self.graph.add_nodes(to_add)
+            self.graphdb.add_nodes(to_add)
         if to_update:
-            self.graph.update_nodes(to_update)
+            self.graphdb.update_nodes(to_update)
 
     def upsert_edge(self, source_name: str, target_name: str, updates: Dict[str, Any]) -> None:
-        self.graph.update_edge(source_name, target_name, updates)
+        self.graphdb.update_edge(source_name, target_name, updates)
 
     def upsert_edges(self, updates_list: List[Dict[str, Any]]) -> None:
         to_add = []
         to_update = []
         for upd in updates_list:
-            existing = self.graph.get_edge(upd["source_name"], upd["target_name"])
+            existing = self.graphdb.get_edge(upd["source_name"], upd["target_name"])
             if existing is None:
                 to_add.append(upd)
             else:
                 to_update.append(upd)
         if to_add:
-            self.graph.add_edges(to_add)
+            self.graphdb.add_edges(to_add)
         if to_update:
-            self.graph.update_edges(to_update)
+            self.graphdb.update_edges(to_update)
 
     # 4) Chunk Vectors
     def upsert_chunk_vector(self, chunks: Sequence[Dict[str, Any]]) -> None:

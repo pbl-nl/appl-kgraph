@@ -21,18 +21,19 @@ Use {language} as output language.
 1. Identify all entities. For each identified entity, extract the following information:
 - entity_name: Name of the entity, use same language as input text. If English, capitalized the name.
 - entity_type: One of the following types: [{entity_types}]
+- For entities of type "organization": only create an organization entity when the text provides a specific name (a proper proper noun), such as "Northbridge Analytics Institute" or "City of Amber Council". Do NOT create an organization entity when the text only contains generic terms like "the company", "the organization", "my employer", "the department" unless a specific name is also explicitly given.
 - entity_description: Comprehensive description of the entity's attributes and activities
 Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>)
 
 2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
 For each pair of related entities, extract the following information:
+- When two people are clearly described as working at the same organization but only a generic organization term is mentioned (e.g., "Emma and Samir work at the same organization"), represent this as a direct relationship between the people (e.g., colleagues, same employer) rather than inventing a placeholder organization entity.
 - source_entity: name of the source entity, as identified in step 1
 - target_entity: name of the target entity, as identified in step 1
 - relationship_description: explanation as to why you think the source entity and the target entity are related to each other
 - relationship_strength: a numeric score indicating strength of the relationship between the source entity and target entity
 - relationship_keywords: one or more high-level key words that summarize the overarching nature of the relationship, focusing on concepts or themes rather than specific details
 Format each relationship as ("relationship"{tuple_delimiter}<source_entity_name>{tuple_delimiter}<target_entity_name>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_keywords>{tuple_delimiter}<relationship_strength>)
-
 
 3. Identify high-level key words that summarize the main concepts, themes, or topics of the entire text. These should capture the overarching ideas present in the document.
 Format the content-level key words as ("content_keywords"{tuple_delimiter}<high_level_keywords>)
@@ -54,6 +55,7 @@ Text:
 {input_text}
 ######################
 Output:"""
+
 
 PROMPTS["entity_extraction_examples"] = [
     """Example 1:
@@ -131,6 +133,22 @@ Output:
 ("relationship"{tuple_delimiter}"Noah Carter"{tuple_delimiter}"Carbon-Fiber Spikes"{tuple_delimiter}"Noah Carter used carbon-fiber spikes to enhance performance during the race."{tuple_delimiter}"athletic equipment, performance boost"{tuple_delimiter}7){record_delimiter}
 ("relationship"{tuple_delimiter}"World Athletics Federation"{tuple_delimiter}"100m Sprint Record"{tuple_delimiter}"The World Athletics Federation is responsible for validating and recognizing new sprint records."{tuple_delimiter}"sports regulation, record certification"{tuple_delimiter}9){record_delimiter}
 ("content_keywords"{tuple_delimiter}"athletics, sprinting, record-breaking, sports technology, competition"){completion_delimiter}
+#############################""",
+   """Example 4:
+
+Entity_types: [person, organization]
+Text:
+```
+Emma Li and Samir Novak work at the same organization. Later, Emma joins Northbridge Analytics Institute as a data scientist.
+```
+
+Output:
+("entity"{tuple_delimiter}"Emma Li"{tuple_delimiter}"person"{tuple_delimiter}"Emma Li is a data scientist who works at the same (unspecified) organization as Samir Novak and later joins Northbridge Analytics Institute."){record_delimiter}
+("entity"{tuple_delimiter}"Samir Novak"{tuple_delimiter}"person"{tuple_delimiter}"Samir Novak is a professional who works at the same (unspecified) organization as Emma Li."){record_delimiter}
+("entity"{tuple_delimiter}"Northbridge Analytics Institute"{tuple_delimiter}"organization"{tuple_delimiter}"Northbridge Analytics Institute is a specific, named organization where Emma later works as a data scientist."){record_delimiter}
+("relationship"{tuple_delimiter}"Emma Li"{tuple_delimiter}"Samir Novak"{tuple_delimiter}"They are colleagues working at the same organization, which is mentioned generically but not named in the text."{tuple_delimiter}"colleagues, same employer"{tuple_delimiter}8){record_delimiter}
+("relationship"{tuple_delimiter}"Emma Li"{tuple_delimiter}"Northbridge Analytics Institute"{tuple_delimiter}"Employment relationship; Emma works as a data scientist at this specifically named organization."{tuple_delimiter}"employment, data science"{tuple_delimiter}9){record_delimiter}
+("content_keywords"{tuple_delimiter}"employment, colleagues, organization, data science, career move"){completion_delimiter}
 #############################""",
 ]
 
@@ -226,6 +244,42 @@ When handling relationships with timestamps:
 - Ensure the response maintains continuity with the conversation history.
 - List up to 5 most important reference sources at the end under "References" section. Clearly indicating whether each source is from Knowledge Graph (KG) or Document Chunks (DC), and include the file path if available, in the following format: [KG/DC] file_path
 - If you don't know the answer, just say so.
+- Do not make anything up. Do not include information not provided by the Knowledge Base.
+- Additional user prompt: {user_prompt}
+
+Response:"""
+
+PROMPTS["pathrag_response"] = """---Role---
+
+You are a helpful assistant responding to a user query about Knowledge Graph data and Document Chunks provided in JSON format below.
+
+---Goal---
+
+Generate a concise response based on the Knowledge Base and follow the Response Rules, considering both the conversation history and the current query. Summarize all information in the provided Knowledge Base, incorporating general knowledge only when it directly supports interpreting the Knowledge Base content. Do not include information not provided by the Knowledge Base.
+
+When handling relationships with timestamps:
+1. Each relationship has a "created_at" timestamp indicating when we acquired this knowledge.
+2. When encountering conflicting relationships, consider both the semantic content and the timestamp.
+3. Do not automatically prefer the most recently created relationships—use judgment based on the context.
+4. For time-specific queries, prioritize temporal information in the content before considering creation timestamps.
+
+---Conversation History---
+{history}
+
+---Knowledge Graph and Document Chunks---
+{context_data}
+
+(Either or both may include multi-step paths: sequences of connected entities and relationships. You may use these indirect connections—such as paths like A → B → C—when they are relevant to answering the user's query. You do not need to explain your reasoning steps unless the user explicitly asks.)
+
+---Response Rules---
+
+- Target format and length: {response_type}
+- Use markdown formatting with appropriate section headings
+- Please respond in the same language as the user's question.
+- Ensure the response maintains continuity with the conversation history.
+- When helpful and relevant, synthesize information from multi-hop paths and indirect connections in the Knowledge Graph.
+- List up to 5 most important reference sources at the end under a "References" section. Clearly indicate whether each source is from the Knowledge Graph (KG) or from Document Chunks (DC), and include the file path if available, using the following format: [KG/DC] file_path
+- If you don't know the answer, say so directly.
 - Do not make anything up. Do not include information not provided by the Knowledge Base.
 - Additional user prompt: {user_prompt}
 

@@ -398,7 +398,7 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
 
     - Node identity is based on the node name only (string equality).
     - Note to self: Does not update node types anymore because we don't extract src/tgt types.
-    - Newly created nodes are given type "unknown" and empty metadata fields.
+    - Newly created nodes are given type "unknown" and populated with source_id/filepath from edges.
     - Existing nodes are left unchanged.
 
     Returns
@@ -407,6 +407,8 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
         A list of nodes that were newly created (so that vector embeddings can be
         generated later). If no new nodes were needed, the list is empty.
     """
+    delim = settings.ingestion.delimiter
+
     # Collect all unique node names from edges (source + target)
     names = {
         (e.get("source_name") or "").strip()
@@ -420,6 +422,28 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
     if not names:
         return []
 
+    # Build metadata map from edges for each node
+    node_metadata: Dict[str, Dict[str, set]] = defaultdict(
+        lambda: {"source_ids": set(), "filepaths": set()}
+    )
+    for e in edges:
+        src_name = (e.get("source_name") or "").strip()
+        tgt_name = (e.get("target_name") or "").strip()
+        source_id = (e.get("source_id") or "").strip()
+        filepath = (e.get("filepath") or "").strip()
+
+        if src_name:
+            if source_id:
+                node_metadata[src_name]["source_ids"].add(source_id)
+            if filepath:
+                node_metadata[src_name]["filepaths"].add(filepath)
+
+        if tgt_name:
+            if source_id:
+                node_metadata[tgt_name]["source_ids"].add(source_id)
+            if filepath:
+                node_metadata[tgt_name]["filepaths"].add(filepath)
+
     # Fetch any existing nodes in bulk
     existing_rows = storage.get_nodes(list(names)) or []
     existing_by_name = {row["name"]: row for row in existing_rows if row.get("name")}
@@ -429,13 +453,14 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
 
     for nm in names:
         if nm not in existing_by_name:
-            # Create a new placeholder node
+            # Create a new placeholder node with metadata from edges
+            meta = node_metadata.get(nm, {"source_ids": set(), "filepaths": set()})
             node = {
                 "name": nm,
                 "type": "unknown",
                 "description": "",
-                "source_id": "",
-                "filepath": "",
+                "source_id": delim.join(sorted(meta["source_ids"])),
+                "filepath": delim.join(sorted(meta["filepaths"])),
             }
             pending.append(node)
             affected.append(node)
@@ -445,6 +470,83 @@ def ensure_edge_endpoints(storage: Storage, edges: List[Dict[str, Any]]) -> List
         storage.upsert_nodes(pending)
 
     return affected
+
+def connect_parent_document(
+    storage: Storage,
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],  # unused, reserved for future
+    doc_meta: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """
+    Creates a parent document node and FROM_DOCUMENT edges connecting all entities
+    from this document to the document node.
+
+    Args:
+        storage (Storage): Storage instance for database operations
+        nodes (List[Dict[str, Any]]): Merged nodes about to be upserted (from merge_graph_data)
+        edges (List[Dict[str, Any]]): Merged edges (unused, for potential future expansion)
+        doc_meta (Dict[str, Any]): Document metadata containing doc_id, filename, filepath
+
+    Returns:
+        List[Dict[str, Any]]: List of new edges connecting entities to the document node
+    """
+    # 1. Extract and validate document info
+    doc_id = doc_meta.get("doc_id")
+    filename = doc_meta.get("filename")
+    filepath_val = doc_meta.get("filepath", "")
+
+    if not doc_id or not filename:
+        return []
+
+    delim = settings.ingestion.delimiter
+
+    # 2. Create document node
+    doc_node = {
+        "name": filename,
+        "type": "document",
+        "description": f"Document node for {filename}",
+        "source_id": doc_id,
+        "filepath": filepath_val,
+    }
+    storage.upsert_nodes([doc_node])
+
+    # 3. Get all chunks for this document to identify entities from it
+    chunks = storage.get_chunks_by_doc_id(doc_id)
+    chunk_uuids = {c["chunk_uuid"] for c in chunks if c.get("chunk_uuid")}
+
+    if not chunk_uuids:
+        return []
+
+    # 4. Create FROM_DOCUMENT edges for all entities from this document
+    document_edges: List[Dict[str, Any]] = []
+
+    for node in nodes:
+        node_name = node.get("name", "")
+        if not node_name or node_name == filename:  # Skip empty names and document itself
+            continue
+
+        # Check if this node came from this document by examining source_ids
+        node_source_ids = (node.get("source_id") or "").split(delim)
+        has_chunk_from_doc = any(
+            sid.strip() in chunk_uuids
+            for sid in node_source_ids
+            if sid.strip()
+        )
+
+        if has_chunk_from_doc:
+            # Create edge from entity to document
+            edge = {
+                "source_name": node_name,
+                "target_name": filename,
+                "weight": 10,
+                "description": "Entity extracted from document",
+                "keywords": "FROM_DOCUMENT",
+                "source_id": doc_id,  # Use doc_id (not chunk_uuid) for document-level edges
+                "filepath": filepath_val,
+            }
+            document_edges.append(edge)
+
+    return document_edges
 
 def remove_document_from_storage(storage: Storage, filename: str) -> None:
     """
@@ -730,6 +832,11 @@ def ingest_paths(paths: List[Path]):
             all_entities.extend(placeholders)           # collect for vector DB later
 
         nodes, edges = merge_graph_data(storage, entities_in, edges_in)
+
+        # Connect entities to parent document
+        doc_edges = connect_parent_document(storage, nodes, edges, doc_meta)
+        if doc_edges:
+            edges.extend(doc_edges)  # Add document edges to batch
 
         if nodes:
             storage.upsert_nodes(nodes)                 # write schema

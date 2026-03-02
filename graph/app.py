@@ -14,18 +14,13 @@ from fileparser import FileParser
 from ingestion_app import ingest_paths
 from pathrag import PathRAG, render_full_context
 from lightrag import LightRAG, render_full_context
-
+import settings
 
 # =====================================================
 # -------- INITIAL RANDOM GRAPH CREATION --------------
 # =====================================================
 mygraph = nx.Graph()
 # COLOR_MODE = "type"
-
-# =====================================================
-# -------- VALID EXTENSIONS FOR DOCUMENT SELECTION ----
-# =====================================================
-VALID_EXTENSIONS = [".pdf", ".docx", ".txt", ".md"]
 
 # =====================================================
 # -------- DYNAMIC COLOR GENERATION -------------------
@@ -366,38 +361,26 @@ def save_graph_pickle():
         pickle.dump(mygraph, f)
     return "✅ Graph saved as graph.pkl"
 
-# =====================================================
-# -------- FOLDER-BASED DOCUMENT SELECTION ------------
-# =====================================================
-def list_files_in_folder(folder_path):
-    print(folder_path)
-    if not folder_path or not os.path.isdir(folder_path):
-        return gr.update(choices=[]), "⚠️ Please enter a valid folder path."
-    files = []
-    for ext in VALID_EXTENSIONS:
-        files += glob.glob(os.path.join(folder_path, f"*{ext}"))
-    files = sorted(os.path.basename(f) for f in files)
-    if not files:
-        return gr.update(choices=[]), f"📂 No files found with extensions: {', '.join(VALID_EXTENSIONS)}."
-    return gr.update(choices=files, value=[])
-    # return gr.update(choices=files), f"✅ Found {len(files)} valid files."
 
-
-def handle_ingestion(folder_path, selected_files):
+def handle_ingestion(folder_path):
+    # =====================================================
+    # -------- FOLDER-BASED DOCUMENT SELECTION ------------
+    # =====================================================
     # Initialize an empty list to store status messages
     status_messages = []
-
-    # create list of paths of selected files
-    paths = FileParser(Path(folder_path)).filepaths
-    if not paths:
-        print("No files to ingest.")
-        return
-
-    # Iterate over the generator returned by process_files
-    for graph, status in ingest_paths(paths):
-        status_messages.append(status)
-        # Yield the current status messages
-        yield graph, "\n".join(status_messages)
+    if not folder_path or not os.path.isdir(folder_path):
+        yield None, "⚠️ Please enter a valid folder path."
+    else:
+        paths = [Path(os.path.join(folder_path, f)) for f in os.listdir(folder_path) 
+                 if ((os.path.isfile(os.path.join(folder_path, f))) and (Path(f).suffix in settings.VALID_EXTENSIONS))]
+        if not paths:
+            yield None, f"📂 No files found with extensions: {', '.join(settings.VALID_EXTENSIONS)}."
+        else:
+            # Iterate over the generator returned by process_files
+            for graph, status in ingest_paths(paths):
+                status_messages.append(status)
+                # Yield the current status messages
+                yield graph, "\n".join(status_messages)
 
 
 async def create_pathrag_response(question: str, chat_history: List[gr.ChatMessage]) -> Tuple[str, List[gr.ChatMessage], str]:
@@ -421,6 +404,8 @@ async def create_pathrag_response(question: str, chat_history: List[gr.ChatMessa
         system_prompt=""
     )
     result = await pathrag.aretrieve(question)
+    
+    # print(f"Pathrag result = {result}")
 
     # chat_history.append(gr.ChatMessage(role="assistant", content=result.answer, metadata={"title":  "Processing..."}))
     chat_history.append(gr.ChatMessage(role="assistant", content=result.answer))
@@ -462,6 +447,8 @@ async def create_lightrag_response(question: str, chat_history: List[gr.ChatMess
     )
     result = await lightrag.aretrieve(question)
     
+    # print(f"Lightrag result = {result}")
+    
     # chat_history.append(gr.ChatMessage(role="assistant", content=result.answer, metadata={"title":  "Processing..."}))
     chat_history.append(gr.ChatMessage(role="assistant", content=result.answer))
     # print(f"chat_history = {chat_history}")
@@ -471,7 +458,11 @@ async def create_lightrag_response(question: str, chat_history: List[gr.ChatMess
         for i, chunk in enumerate(result.all_chunks, 1):
             # head = f"{chunk.filename or chunk.document_id or '(unknown doc)'}"
             # lines += f"{i}. {head} (score={chunk.score:.3f})\n"
-            lines += f"{i}. {chunk}\n"
+            lines += f"{i}. {chunk['source_type']}"
+            if chunk['source_type'] == "vector":
+                lines += f" (score={chunk['score']:.3f})"
+            lines += "\n"
+            lines += f"{chunk['text']}\n"
             lines += 46*"-" + "\n\n"
 
     return "", chat_history, lines
@@ -560,20 +551,10 @@ with gr.Blocks(theme="glass", css=".prompt {color: green}") as demo:
         # Folder and file(s) selection
         folder_path_input = gr.Textbox(
             label="Enter document folder (complete path)",
-            # label="Enter document folder (complete path) and hit Enter",
-            submit_btn=True
-            # placeholder="e.g. /home/user/Documents",
+            interactive=True,
         )
-        file_selection = gr.Checkbox(
-            label="Select File(s)",
-            value=False
-        )
-        file_selector = gr.CheckboxGroup(
-            visible=False,
-            show_label=False,
-            choices=[]
-        )
-        go_btn = gr.Button(value="GO", variant="primary")
+        # button to start ingestion process
+        go_btn = gr.Button(value="Load Knowledge Graph", variant="primary")
 
         # Output status messages
         status_messages = gr.Textbox(
@@ -687,32 +668,14 @@ with gr.Blocks(theme="glass", css=".prompt {color: green}") as demo:
 
     # --- Bindings ---
     # sidebar components
-    # Update the checkbox group when folder path is entered
-    folder_path_input.submit(fn=list_files_in_folder,
-                             inputs=folder_path_input,
-                             outputs=file_selector)
-    
-    # # Update on losing focus / manual change
-    # folder_path_input.change(fn=list_files_in_folder,
-    #                          inputs=folder_path_input,
-    #                          outputs=file_selector)
-    
-    # Link checkbox state to the visibility of the checkbox group
-    file_selection.select(
-        lambda value: gr.update(visible=value),
-        inputs=file_selection,
-        outputs=file_selector
-    )
-
     # Go button click triggers ingestion process
     go_btn.click(fn=handle_ingestion,
-                 inputs=[folder_path_input, file_selector],
+                 inputs=[folder_path_input],
                  outputs=[graph_html, status_messages] 
                  ).then(fn=update_dropdowns,
                         outputs=[m1, m2, edit_node_dropdown]
                         )
                         # then(fn=load_graph_from_pkl, inputs=[folder_path_input], outputs=[graph_html]). \
-
     # submission of prompt triggers respons process
     pathrag_msg_input.submit(fn=create_pathrag_response,
                              inputs=[pathrag_msg_input, pathrag_chatbot],
@@ -722,10 +685,6 @@ with gr.Blocks(theme="glass", css=".prompt {color: green}") as demo:
                               outputs=[lightrag_msg_input, lightrag_chatbot, lightrag_sources])
     
     # clear prompt and chat history
-    # clear_btn.click(fn=lambda: None,
-    #                 inputs=None,
-    #                 outputs=[pathrag_chatbot, lightrag_chatbot, pathrag_sources, lightrag_sources],
-    #                 queue=False)
     pathrag_clear_btn.click(fn=lambda: [None, None, None],
                             inputs=[],
                             outputs=[pathrag_msg_input, pathrag_chatbot, pathrag_sources],

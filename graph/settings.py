@@ -2,115 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import List, Optional, Literal
 from dotenv import load_dotenv
+import utils as ut
 
 
-# ─────────────────────────────────────────────────────────────
-# Small helpers to parse environment variables robustly
-# ─────────────────────────────────────────────────────────────
-
-def _strip_quotes(val: Optional[str]) -> Optional[str]:
-    """
-    Removes surrounding quotes from environment variable values.
-
-    Args:
-        val (Optional[str]): The value to process.
-
-    Returns:
-        Optional[str]: The value with quotes stripped, or None if input was None.
-    """
-    if val is None:
-        return None
-    v = val.strip()
-    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-        return v[1:-1]
-    return v
-
-def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
-    """
-    Reads a string environment variable with quote stripping.
-
-    Args:
-        key (str): The environment variable name.
-        default (Optional[str], optional): Default value if not found. Defaults to None.
-
-    Returns:
-        Optional[str]: The environment variable value or default.
-    """
-    val = os.getenv(key)
-    return _strip_quotes(val) if val is not None else default
-
-def env_int(key: str, default: int) -> int:
-    """
-    Reads an integer environment variable with fallback to default.
-
-    Args:
-        key (str): The environment variable name.
-        default (int): Default value if not found or invalid.
-
-    Returns:
-        int: The parsed integer value or default.
-    """
-    val = env_str(key)
-    if val is None or val == "":
-        return default
-    try:
-        return int(val)
-    except ValueError:
-        return default
-
-def env_float(key: str, default: float) -> float:
-    """
-    Reads a float environment variable with fallback to default.
-
-    Args:
-        key (str): The environment variable name.
-        default (float): Default value if not found or invalid.
-
-    Returns:
-        float: The parsed float value or default.
-    """
-    val = env_str(key)
-    if val is None or val == "":
-        return default
-    try:
-        return float(val)
-    except ValueError:
-        return default
-
-def env_bool(key: str, default: bool) -> bool:
-    """
-    Reads a boolean environment variable with fallback to default.
-
-    Args:
-        key (str): The environment variable name.
-        default (bool): Default value if not found.
-
-    Returns:
-        bool: True if value is in {"1", "true", "yes", "y", "t"}, otherwise default.
-    """
-    val = env_str(key)
-    if val is None:
-        return default
-    return val.strip().lower() in {"1", "true", "yes", "y", "t"}
-
-def env_list(key: str, default_csv: str, sep: str = ",") -> List[str]:
-    """
-    Reads a delimited list environment variable.
-
-    Args:
-        key (str): The environment variable name.
-        default_csv (str): Default comma-separated value string.
-        sep (str, optional): Delimiter character. Defaults to ",".
-
-    Returns:
-        List[str]: List of trimmed non-empty values.
-    """
-    raw = env_str(key, default_csv) or ""
-    return [x.strip() for x in raw.split(sep) if x.strip()]
+VALID_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".html"]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -293,23 +191,23 @@ def load_settings() -> Settings:
     load_dotenv()  # called once at startup
 
     # Provider selection
-    provider_name = (env_str("LLM_PROVIDER", "openai") or "openai").strip().lower()
+    provider_name = (ut.env_str("LLM_PROVIDER", "openai") or "openai").strip().lower()
     if provider_name not in {"openai", "azure"}:
         raise RuntimeError("LLM_PROVIDER must be 'openai' or 'azure'.")
 
     provider = ProviderSettings(
         provider=provider_name,  # type: ignore[arg-type]
         # OpenAI
-        openai_api_key=env_str("OPENAI_API_KEY"),
-        openai_base_url=env_str("OPENAI_BASE_URL"),
-        openai_llm_model=env_str("OPENAI_LLM_MODEL"),
-        openai_embeddings_model=env_str("OPENAI_EMBEDDINGS_MODEL"),
+        openai_api_key=ut.env_str("OPENAI_API_KEY"),
+        openai_base_url=ut.env_str("OPENAI_BASE_URL"),
+        openai_llm_model=ut.env_str("OPENAI_LLM_MODEL"),
+        openai_embeddings_model=ut.env_str("OPENAI_EMBEDDINGS_MODEL"),
         # Azure
-        azure_api_key=env_str("AZURE_OPENAI_API_KEY"),
-        azure_endpoint=env_str("AZURE_OPENAI_ENDPOINT"),
-        azure_api_version=env_str("AZURE_OPENAI_API_VERSION", "2024-02-15-preview") or "2024-02-15-preview",
-        azure_llm_deployment=env_str("AZURE_OPENAI_LLM_DEPLOYMENT_NAME"),
-        azure_embeddings_deployment=env_str("AZURE_OPENAI_EMB_DEPLOYMENT_NAME"),
+        azure_api_key=ut.env_str("AZURE_OPENAI_API_KEY"),
+        azure_endpoint=ut.env_str("AZURE_OPENAI_ENDPOINT"),
+        azure_api_version=ut.env_str("AZURE_OPENAI_API_VERSION", "2024-02-15-preview") or "2024-02-15-preview",
+        azure_llm_deployment=ut.env_str("AZURE_OPENAI_LLM_DEPLOYMENT_NAME"),
+        azure_embeddings_deployment=ut.env_str("AZURE_OPENAI_EMB_DEPLOYMENT_NAME"),
     )
 
     # Validate provider-specific required fields
@@ -331,89 +229,89 @@ def load_settings() -> Settings:
             raise RuntimeError(f"When LLM_PROVIDER=azure, set required variables: {', '.join(missing)}")
 
     chat = ChatGenerationSettings(
-        temperature=env_float("CHAT_TEMPERATURE", 0.0),
-        max_tokens=env_int("CHAT_MAX_TOKENS", 2048),
+        temperature=ut.env_float("CHAT_TEMPERATURE", 0.0),
+        max_tokens=ut.env_int("CHAT_MAX_TOKENS", 2048),
     )
 
     llmperf = LLMPerformanceSettings(
-        max_concurrency=env_int("LLM_MAX_CONCURRENCY", 6),
-        cache_enabled=env_bool("LLM_CACHE_ENABLED", True),
-        cache_max_age_hours=env_int("LLM_CACHE_MAX_AGE_HOURS", 720),
+        max_concurrency=ut.env_int("LLM_MAX_CONCURRENCY", 6),
+        cache_enabled=ut.env_bool("LLM_CACHE_ENABLED", True),
+        cache_max_age_hours=ut.env_int("LLM_CACHE_MAX_AGE_HOURS", 720),
     )
 
     embeddings = EmbeddingSettings(
-        batch_size=env_int("EMBEDDING_BATCH_SIZE", 64),
+        batch_size=ut.env_int("EMBEDDING_BATCH_SIZE", 64),
     )
 
     prompts = PromptFormattingSettings(
-        default_language=env_str("PROMPT_DEFAULT_LANGUAGE", "English") or "English",
-        tuple_delimiter=env_str("PROMPT_TUPLE_DELIMITER", "<|>") or "<|>",
-        record_delimiter=env_str("PROMPT_RECORD_DELIMITER", "##") or "##",
-        completion_delimiter=env_str("PROMPT_COMPLETION_DELIMITER", "<|COMPLETE|>") or "<|COMPLETE|>",
-        default_entity_types=env_list(
+        default_language=ut.env_str("PROMPT_DEFAULT_LANGUAGE", "English") or "English",
+        tuple_delimiter=ut.env_str("PROMPT_TUPLE_DELIMITER", "<|>") or "<|>",
+        record_delimiter=ut.env_str("PROMPT_RECORD_DELIMITER", "##") or "##",
+        completion_delimiter=ut.env_str("PROMPT_COMPLETION_DELIMITER", "<|COMPLETE|>") or "<|COMPLETE|>",
+        default_entity_types=ut.env_list(
             "PROMPT_DEFAULT_ENTITY_TYPES",
             "organization,person,geo,event,category"
         ),
     )
 
     ingestion = IngestionMergeSettings(
-        delimiter=env_str("MERGE_DELIMITER", "||") or "||",
-        description_segment_limit=env_int("DESCRIPTION_SEGMENT_LIMIT", 5),
+        delimiter=ut.env_str("MERGE_DELIMITER", "||") or "||",
+        description_segment_limit=ut.env_int("DESCRIPTION_SEGMENT_LIMIT", 5),
     )
 
     chunking = ChunkingSettings(
-        max_chars=env_int("CHUNK_MAX_CHARS", 1200),
-        overlap_chars=env_int("CHUNK_OVERLAP_CHARS", 200),
-        include_overlap_in_limit=env_bool("CHUNK_INCLUDE_OVERLAP_IN_LIMIT", True),
-        join_with=env_str("CHUNK_JOIN_WITH", " ") or " ",
+        max_chars=ut.env_int("CHUNK_MAX_CHARS", 1200),
+        overlap_chars=ut.env_int("CHUNK_OVERLAP_CHARS", 200),
+        include_overlap_in_limit=ut.env_bool("CHUNK_INCLUDE_OVERLAP_IN_LIMIT", True),
+        join_with=ut.env_str("CHUNK_JOIN_WITH", " ") or " ",
     )
 
     storage = StoragePaths(
-        documents_db=env_str("DOCUMENTS_DB_PATH", "./storage/documents.sqlite") or "./storage/documents.sqlite",
-        chunks_db=env_str("CHUNKS_DB_PATH", "./storage/chunks.sqlite") or "./storage/chunks.sqlite",
-        graph_db=env_str("GRAPH_DB_PATH", "./storage/graph.sqlite") or "./storage/graph.sqlite",
-        chroma_chunks=env_str("CHROMA_CHUNKS_PATH", "./storage/chroma_chunks") or "./storage/chroma_chunks",
-        chroma_entities=env_str("CHROMA_ENTITIES_PATH", "./storage/chroma_entities") or "./storage/chroma_entities",
-        chroma_relations=env_str("CHROMA_RELATIONS_PATH", "./storage/chroma_relations") or "./storage/chroma_relations",
+        documents_db=ut.env_str("DOCUMENTS_DB_PATH", "./storage/documents.sqlite") or "./storage/documents.sqlite",
+        chunks_db=ut.env_str("CHUNKS_DB_PATH", "./storage/chunks.sqlite") or "./storage/chunks.sqlite",
+        graph_db=ut.env_str("GRAPH_DB_PATH", "./storage/graph.sqlite") or "./storage/graph.sqlite",
+        chroma_chunks=ut.env_str("CHROMA_CHUNKS_PATH", "./storage/chroma_chunks") or "./storage/chroma_chunks",
+        chroma_entities=ut.env_str("CHROMA_ENTITIES_PATH", "./storage/chroma_entities") or "./storage/chroma_entities",
+        chroma_relations=ut.env_str("CHROMA_RELATIONS_PATH", "./storage/chroma_relations") or "./storage/chroma_relations",
     )
 
     retrieval = RetrievalSettings(
-        entity_top_k=env_int("RETRIEVAL_ENTITY_TOP_K", 5),
-        relation_top_k=env_int("RETRIEVAL_RELATION_TOP_K", 5),
-        chunk_top_k=env_int("RETRIEVAL_CHUNK_TOP_K", 6),
-        graph_depth=env_int("RETRIEVAL_GRAPH_DEPTH", 2),
-        graph_windows=env_int("RETRIEVAL_GRAPH_WINDOWS", 3),
-        chunk_windows=env_int("RETRIEVAL_CHUNK_WINDOWS", 3),
-        graph_window_tokens=env_int("RETRIEVAL_GRAPH_WINDOW_TOKENS", 512),
-        chunk_window_tokens=env_int("RETRIEVAL_CHUNK_WINDOW_TOKENS", 512),
-        tiktoken_model = env_str("RETRIEVAL_TIKTOKEN_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
-        llm_max_tokens = env_int("RETRIEVAL_LLM_MAX_TOKENS", 512),
-        llm_temperature = env_float("RETRIEVAL_LLM_TEMPERATURE", 0.0),
-        history_turns= env_int("RETRIEVAL_HISTORY_TURNS", 4),
+        entity_top_k=ut.env_int("RETRIEVAL_ENTITY_TOP_K", 5),
+        relation_top_k=ut.env_int("RETRIEVAL_RELATION_TOP_K", 5),
+        chunk_top_k=ut.env_int("RETRIEVAL_CHUNK_TOP_K", 6),
+        graph_depth=ut.env_int("RETRIEVAL_GRAPH_DEPTH", 2),
+        graph_windows=ut.env_int("RETRIEVAL_GRAPH_WINDOWS", 3),
+        chunk_windows=ut.env_int("RETRIEVAL_CHUNK_WINDOWS", 3),
+        graph_window_tokens=ut.env_int("RETRIEVAL_GRAPH_WINDOW_TOKENS", 512),
+        chunk_window_tokens=ut.env_int("RETRIEVAL_CHUNK_WINDOW_TOKENS", 512),
+        tiktoken_model = ut.env_str("RETRIEVAL_TIKTOKEN_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
+        llm_max_tokens = ut.env_int("RETRIEVAL_LLM_MAX_TOKENS", 512),
+        llm_temperature = ut.env_float("RETRIEVAL_LLM_TEMPERATURE", 0.0),
+        history_turns= ut.env_int("RETRIEVAL_HISTORY_TURNS", 4),
         # Hybrid/global
-        hybrid_use_paths_for_global = env_bool("RETRIEVAL_HYBRID_USE_PATHS_FOR_GLOBAL", True),
-        hybrid_use_relations_for_global = env_bool("RETRIEVAL_HYBRID_USE_RELATIONS_FOR_GLOBAL", False),
-        global_max_windows = env_int("RETRIEVAL_GLOBAL_MAX_WINDOWS", 4),
-        global_window_tokens = env_int("RETRIEVAL_GLOBAL_WINDOW_TOKENS", 512),
+        hybrid_use_paths_for_global = ut.env_bool("RETRIEVAL_HYBRID_USE_PATHS_FOR_GLOBAL", True),
+        hybrid_use_relations_for_global = ut.env_bool("RETRIEVAL_HYBRID_USE_RELATIONS_FOR_GLOBAL", False),
+        global_max_windows = ut.env_int("RETRIEVAL_GLOBAL_MAX_WINDOWS", 4),
+        global_window_tokens = ut.env_int("RETRIEVAL_GLOBAL_WINDOW_TOKENS", 512),
         # Local
-        use_local_chunks = env_bool("RETRIEVAL_USE_LOCAL_CHUNKS", True),
-        use_local_graph = env_bool("RETRIEVAL_USE_LOCAL_GRAPH", True),
-        local_max_windows = env_int("RETRIEVAL_LOCAL_MAX_WINDOWS", 6),
+        use_local_chunks = ut.env_bool("RETRIEVAL_USE_LOCAL_CHUNKS", True),
+        use_local_graph = ut.env_bool("RETRIEVAL_USE_LOCAL_GRAPH", True),
+        local_max_windows = ut.env_int("RETRIEVAL_LOCAL_MAX_WINDOWS", 6),
         # PathRAG-specific
-        path_use_top_entities = env_int("RETRIEVAL_PATH_USE_TOP_ENTITIES", 5),
-        path_max_depth = env_int("RETRIEVAL_PATH_MAX_DEPTH", 3),
-        path_threshold = env_float("RETRIEVAL_PATH_THRESHOLD", 0.3),
-        path_alpha = env_float("RETRIEVAL_PATH_ALPHA", 0.8),
-        path_max_windows = env_int("RETRIEVAL_PATH_MAX_WINDOWS", 5),
-        path_window_tokens = env_int("RETRIEVAL_PATH_WINDOW_TOKENS", 512),
+        path_use_top_entities = ut.env_int("RETRIEVAL_PATH_USE_TOP_ENTITIES", 5),
+        path_max_depth = ut.env_int("RETRIEVAL_PATH_MAX_DEPTH", 3),
+        path_threshold = ut.env_float("RETRIEVAL_PATH_THRESHOLD", 0.3),
+        path_alpha = ut.env_float("RETRIEVAL_PATH_ALPHA", 0.8),
+        path_max_windows = ut.env_int("RETRIEVAL_PATH_MAX_WINDOWS", 5),
+        path_window_tokens = ut.env_int("RETRIEVAL_PATH_WINDOW_TOKENS", 512),
         # LightRAG-specific
-        light_mode = env_str("RETRIEVAL_LIGHT_MODE", "mix"),
-        response_type = env_str("RETRIEVAL_RESPONSE_TYPE", "Single Paragraphs"),
-        enable_rerank = env_bool("RETRIEVAL_ENABLE_RERANK", True),
-        rerank_top_k = env_int("RETRIEVAL_RERANK_TOP_K", 20),
-        rerank_cache_dir = env_str("RETRIEVAL_RERANK_CACHE_DIR", "./flashrank_model"),
-        rerank_model_name = env_str("RETRIEVAL_RERANK_MODEL_NAME", "ms-marco-MultiBERT-L-12"),
-        truncate_chunks = env_bool("RETRIEVAL_TRUNCATE_CHUNKS", False),
+        light_mode = ut.env_str("RETRIEVAL_LIGHT_MODE", "mix"),
+        response_type = ut.env_str("RETRIEVAL_RESPONSE_TYPE", "Single Paragraphs"),
+        enable_rerank = ut.env_bool("RETRIEVAL_ENABLE_RERANK", True),
+        rerank_top_k = ut.env_int("RETRIEVAL_RERANK_TOP_K", 20),
+        rerank_cache_dir = ut.env_str("RETRIEVAL_RERANK_CACHE_DIR", "./flashrank_model"),
+        rerank_model_name = ut.env_str("RETRIEVAL_RERANK_MODEL_NAME", "ms-marco-MultiBERT-L-12"),
+        truncate_chunks = ut.env_bool("RETRIEVAL_TRUNCATE_CHUNKS", False),
     )
 
     return Settings(

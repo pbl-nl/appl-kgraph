@@ -10,7 +10,7 @@ from typing import List, Tuple, Dict, Any, Union
 from langchain_community.document_loaders import BSHTMLLoader
 from langchain_community.document_loaders import TextLoader
 import utils as ut
-
+import settings
 
 class FileParser:
     """
@@ -18,13 +18,8 @@ class FileParser:
     and returns pages and metadata in a standardized format.
     """
     
-    SUPPORTED_EXTENSIONS = {'.html', '.docx', '.md', '.pdf', '.txt'}
-    # SUPPORTED_EXTENSIONS = SUPPORTED_EXTENSIONS - {'.docx'} ## THIS IS TEMPORARILY REMOVED DUE TO MACOS ERROR
-
-    def __init__(self, root: Path = None):
-        if root is not None:
-            self.filepaths = list(root.rglob("*"))
-            self.filepaths = [f for f in self.filepaths if f.suffix in self.SUPPORTED_EXTENSIONS]
+    def __init__(self):
+        pass
 
     def parse_file(self, filepath: Union[str, Path]) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """
@@ -49,9 +44,9 @@ class FileParser:
             raise FileNotFoundError(f"File not found: {filepath}")
         
         extension = filepath.suffix.lower()
-        if extension not in self.SUPPORTED_EXTENSIONS:
+        if extension not in settings.VALID_EXTENSIONS:
             raise ValueError(f"Unsupported file extension: {extension}. "
-                           f"Supported extensions: {', '.join(self.SUPPORTED_EXTENSIONS)}")
+                           f"Supported extensions: {', '.join(settings.VALID_EXTENSIONS)}")
         
         # Get basic metadata
         stat = filepath.stat()

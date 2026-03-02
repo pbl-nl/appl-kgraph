@@ -947,7 +947,7 @@ def lightrag_prompt(
     context = naive_context if settings.retrieval.light_mode == "naive" else kg_context + naive_context
     history_context = get_conversation_turns(history)
     user_prompt = PROMPTS["DEFAULT_USER_PROMPT"]
-    sys_prompt_template = PROMPTS["rag_response"] if settings.retrieval.light_mode != "naive" else PROMPTS["rag_response_naive"]
+    sys_prompt_template = PROMPTS["lightrag_response"] if settings.retrieval.light_mode != "naive" else PROMPTS["rag_response_naive"]
     sys_prompt = sys_prompt_template.format(
         context_data=context,
         response_type=settings.retrieval.response_type,

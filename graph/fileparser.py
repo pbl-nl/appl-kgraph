@@ -191,8 +191,8 @@ class FileParser:
     
     def _parse_docx_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """Parse DOCX files"""
-        path_to_pdf = self.convert_docx_to_pdf(filepath)
-        pages, metadata = self._parse_pdf_file(path_to_pdf)
+        path_to_pdf = self.convert_docx_to_pdf(str(filepath))
+        pages, metadata = self._parse_pdf_file(Path(path_to_pdf))
         os.remove(path_to_pdf)  # Clean up the temporary PDF file
         return pages, metadata
         

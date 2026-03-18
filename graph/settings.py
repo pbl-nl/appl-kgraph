@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 import utils as ut
 
 
-VALID_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".html"]
-
+VALID_EXTENSIONS: List[str] = [".pdf", ".docx", ".txt", ".md", ".html"]
 
 # ─────────────────────────────────────────────────────────────
 # Settings sections

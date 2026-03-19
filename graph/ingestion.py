@@ -4,13 +4,14 @@ import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Sequence, Tuple, Optional
 from collections import Counter, defaultdict
-
+import os
+# local imports
 from db_storage import Storage, _normalize_pair
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
 from extractor import extract_from_chunks
 from llm import llm_summarize_text
-from settings import settings
+import settings
 import hashlib
 
 #--------------------------------------------------
@@ -207,7 +208,7 @@ def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str,
     majority vote among all available hints (incoming + existing rows).
     """
 
-    delim = settings.ingestion.delimiter
+    delim = settings.settings.ingestion.delimiter
     grouped: Dict[str, Dict[str, Any]] = {}
 
     for n in nodes:
@@ -302,7 +303,7 @@ def group_edges(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str,
       - Keywords provided as comma-separated strings are normalized once into delimiter-joined sets.
       - Uses _normalize_pair() to ensure undirected uniqueness is consistent with the DB/vector IDs.
     """
-    delim = settings.ingestion.delimiter
+    delim = settings.settings.ingestion.delimiter
 
     # 1) group incoming by normalized undirected pair
     grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
@@ -377,7 +378,7 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     merged_entities = []
     entities = group_nodes(storage, entities)
     for ent in entities:
-        if len(ent["description"].split("||")) > settings.ingestion.description_segment_limit:
+        if len(ent["description"].split("||")) > settings.settings.ingestion.description_segment_limit:
             ent["description"] = llm_summarize_text(ent["description"])
         merged_entities.append(ent)
 
@@ -385,7 +386,7 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     merged_relations = []
     relations = group_edges(storage, relations)
     for rel in relations:
-        if len(rel["description"].split("||")) > settings.ingestion.description_segment_limit:
+        if len(rel["description"].split("||")) > settings.settings.ingestion.description_segment_limit:
             rel["description"] = llm_summarize_text(rel["description"])
         merged_relations.append(rel)
 
@@ -484,7 +485,7 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
     print(f"Found {len(chunk_uuids)} chunks to process")
 
     # Step 2: Process GraphDB - update nodes and edges
-    delim = settings.ingestion.delimiter
+    delim = settings.settings.ingestion.delimiter
     nodes_to_update: List[Dict[str, Any]] = []
     nodes_to_delete: List[str] = []
     edges_to_update: List[Dict[str, Any]] = []
@@ -672,6 +673,7 @@ def ingest_paths(paths: List[Path]):
         remove_document_from_storage(storage, fname)
 
     for p in paths:
+        print(f"Processing file: {p}\n")
         if not p.exists() or not p.is_file():
             continue
         content_hash = file_sha256(p)
@@ -744,8 +746,8 @@ def ingest_paths(paths: List[Path]):
     if all_chunks:
         storage.upsert_chunk_vector(all_chunks) # from storage.py
         deduped_entities = dedupe_entities_for_vectors(all_entities)
-        if all_chunks:
-            print(f"[ingestion] sample chunk: {all_chunks[0]}")
+        # if all_chunks:
+        #     print(f"[ingestion] sample chunk: {all_chunks[0]}")
         if deduped_entities:
             storage.upsert_entity_vector(deduped_entities)
         if all_relations:
@@ -753,12 +755,22 @@ def ingest_paths(paths: List[Path]):
 
 
 def main():
-    root = Path('docs')
-    paths = FileParser(root).filepaths
-    if not paths:
-        print("No files to ingest.")
+    # root = Path('docs')
+    fileparser = FileParser()
+    # Get source folder with docs from user
+    content_folder_path = input("Source folder path of documents (including path): ")
+    if not content_folder_path or not os.path.isdir(content_folder_path):
+        print("Please enter a valid folder path.")
         return
-    ingest_paths(paths)
+    else:
+        paths = [Path(os.path.join(content_folder_path, f)) for f in os.listdir(content_folder_path) 
+                 if ((os.path.isfile(os.path.join(content_folder_path, f))) and (Path(f).suffix in settings.VALID_EXTENSIONS))]
+        if not paths:
+            print(f"📂 No files found with extensions: {', '.join(settings.VALID_EXTENSIONS)}.")
+            return
+        else:
+            ingest_paths(paths)
+
 
 if __name__ == "__main__":
     main()

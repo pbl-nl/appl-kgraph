@@ -1,15 +1,20 @@
 
 from __future__ import annotations
 import os
+import sys
 import sqlite3
 import json
 import hashlib
+import math
+import logging
 from typing import Dict, Any, List, Optional, Sequence, Tuple
 from contextlib import contextmanager
 from dataclasses import replace
 import chromadb  
 from llm import Embedder
 from settings import settings, StoragePaths as SettingsStoragePaths
+
+LOGGER = logging.getLogger("appl_kgraph.storage")
 
 # ---------------------------
 # Helpers
@@ -355,6 +360,13 @@ class ChunksDB:
             cur.execute(f"SELECT * FROM chunks WHERE chunk_uuid IN ({placeholders});", chunk_uuids)
             rows = cur.fetchall()
         return [dict(zip(self.KEYS, row)) for row in rows]
+
+    def list_chunks(self) -> List[Dict[str, Any]]:
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM chunks ORDER BY filename, chunk_id;")
+            rows = cur.fetchall()
+        return [dict(zip(self.KEYS, row)) for row in rows]
     
     def delete_chunks_by_doc_id(self, doc_id: str) -> None:
         with self.connect() as con:
@@ -495,6 +507,18 @@ class GraphDB:
             ''', tuple(names))
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
+
+    def list_nodes(self) -> List[Dict[str, Any]]:
+        keys = [k for k in self.KEYS_NODE if k != "id"]
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute('''
+                SELECT name, type, description, source_id, filepath
+                FROM nodes
+                ORDER BY name;
+            ''')
+            rows = cur.fetchall()
+            return [dict(zip(keys, row)) for row in rows] if rows else []
     
 
     def get_nodes_by_chunk_uuids(self, chunk_uuids: List[str]) -> List[Dict[str, Any]]:
@@ -619,6 +643,18 @@ class GraphDB:
                 FROM edges
                 WHERE (u_source_name, u_target_name) IN ({placeholders});
             ''', tuple(flat_params))
+            rows = cur.fetchall()
+            return [dict(zip(keys, row)) for row in rows] if rows else []
+
+    def list_edges(self) -> List[Dict[str, Any]]:
+        keys = [k for k in self.KEYS_EDGE if k not in {"id", "u_source_name", "u_target_name"}]
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute('''
+                SELECT source_name, target_name, weight, description, keywords, source_id, filepath
+                FROM edges
+                ORDER BY u_source_name, u_target_name;
+            ''')
             rows = cur.fetchall()
             return [dict(zip(keys, row)) for row in rows] if rows else []
         
@@ -932,6 +968,10 @@ class RelationVectors(_ChromaBase):
         x, y = _normalize_pair(a, b)
         return f"{x}::{y}"
 
+    @staticmethod
+    def _embed_text(source_name: str, target_name: str, description: str, keywords: str) -> str:
+        return f"{source_name} <-> {target_name} :: {description} :: {keywords}"
+
     def add_relations(self, relations: Sequence[Dict[str, Any]]) -> None:
         ids: List[str] = []
         texts: List[str] = []
@@ -943,7 +983,7 @@ class RelationVectors(_ChromaBase):
             kw = r.get("keywords", "") or ""
             ids.append(self._edge_id(src, tgt))
             # Embed src + tgt + description + keywords
-            texts.append(f"{src} <-> {tgt} :: {desc} :: {kw}")
+            texts.append(self._embed_text(src, tgt, desc, kw))
             metas.append({
                 "source_name": src,
                 "target_name": tgt,
@@ -974,7 +1014,7 @@ class RelationVectors(_ChromaBase):
             kw = r.get("keywords", "") or ""
             ids.append(self._edge_id(src, tgt))
             # Embed src + tgt + description + keywords
-            texts.append(f"{src} <-> {tgt} :: {desc} :: {kw}")
+            texts.append(self._embed_text(src, tgt, desc, kw))
             metas.append({
                 "source_name": src,
                 "target_name": tgt,
@@ -1027,12 +1067,218 @@ class Storage:
         self.chunk_vectors = ChunkVectors(collection="chunks", chroma_dir=paths.chroma_chunks, embedder=self.embedder)
         self.entity_vectors = EntityVectors(collection="entities", chroma_dir=paths.chroma_entities, embedder=self.embedder)
         self.relation_vectors = RelationVectors(collection="relations", chroma_dir=paths.chroma_relations, embedder=self.embedder)
+        self._chunk_search_cache: Optional[List[Tuple[Dict[str, Any], List[float]]]] = None
+        self._entity_search_cache: Optional[List[Tuple[Dict[str, Any], List[float]]]] = None
+        self._relation_search_cache: Optional[List[Tuple[Dict[str, Any], List[float]]]] = None
+        self._prefer_python_vector_search = self._should_use_python_vector_search()
+        self._vector_mutations_disabled = self._prefer_python_vector_search
+        self._vector_warning_emitted = False
 
     def init(self):
         """Create tables/collections if they don't exist yet."""
         self.documentsdb.init()
         self.chunksdb.init()
         self.graphdb.init()
+
+    def _invalidate_chunk_cache(self) -> None:
+        self._chunk_search_cache = None
+
+    def _invalidate_entity_cache(self) -> None:
+        self._entity_search_cache = None
+
+    def _invalidate_relation_cache(self) -> None:
+        self._relation_search_cache = None
+
+    @staticmethod
+    def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = 0.0
+        norm_a = 0.0
+        norm_b = 0.0
+        for x, y in zip(a, b):
+            dot += float(x) * float(y)
+            norm_a += float(x) * float(x)
+            norm_b += float(y) * float(y)
+        if norm_a <= 0.0 or norm_b <= 0.0:
+            return 0.0
+        return max(0.0, dot / (math.sqrt(norm_a) * math.sqrt(norm_b)))
+
+    @staticmethod
+    def _env_flag(name: str) -> Optional[bool]:
+        raw = os.getenv(name, "").strip().lower()
+        if not raw:
+            return None
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return None
+
+    def _should_use_python_vector_search(self) -> bool:
+        force_python = self._env_flag("APPL_KGRAPH_FORCE_PYTHON_VECTOR_SEARCH")
+        if force_python is not None:
+            return force_python
+        force_chroma = self._env_flag("APPL_KGRAPH_FORCE_CHROMA_QUERY")
+        if force_chroma is not None:
+            return not force_chroma
+        return os.name == "nt" and sys.version_info >= (3, 12)
+
+    def _warn_vector_backend_disabled(self) -> None:
+        if self._vector_mutations_disabled and not self._vector_warning_emitted:
+            LOGGER.warning(
+                "Native Chroma vector mutations are disabled on this environment; "
+                "falling back to SQL-backed similarity search."
+            )
+            self._vector_warning_emitted = True
+
+    @staticmethod
+    def _flatten_query_values(values: Any) -> List[Any]:
+        if values is None:
+            return []
+        if isinstance(values, list) and values and isinstance(values[0], list):
+            return list(values[0])
+        if isinstance(values, list):
+            return list(values)
+        return [values]
+
+    @staticmethod
+    def _distance_to_similarity(value: Any) -> float:
+        try:
+            return max(0.0, 1.0 - float(value))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _native_chunk_search(self, text: str, n_results: int) -> List[Dict[str, Any]]:
+        rows = self.chunk_vectors.query(text=text, n_results=n_results) or []
+        matches: List[Dict[str, Any]] = []
+        for row in rows:
+            ids = self._flatten_query_values(row.get("ids"))
+            documents = self._flatten_query_values(row.get("documents"))
+            metadatas = self._flatten_query_values(row.get("metadatas"))
+            distances = self._flatten_query_values(row.get("distances"))
+            size = max(len(ids), len(documents), len(metadatas), len(distances))
+            for index in range(size):
+                metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
+                matches.append({
+                    "chunk_uuid": ids[index] if index < len(ids) else "",
+                    "doc_id": metadata.get("doc_id", ""),
+                    "filename": metadata.get("filename", ""),
+                    "text": documents[index] if index < len(documents) else "",
+                    "score": self._distance_to_similarity(distances[index] if index < len(distances) else None),
+                })
+        return matches[:n_results]
+
+    def _native_entity_search(self, text: str, n_results: int) -> List[Dict[str, Any]]:
+        rows = self.entity_vectors.query(text=text, n_results=n_results) or []
+        matches: List[Dict[str, Any]] = []
+        for row in rows:
+            metadatas = self._flatten_query_values(row.get("metadatas"))
+            distances = self._flatten_query_values(row.get("distances"))
+            for index, metadata in enumerate(metadatas):
+                if not isinstance(metadata, dict):
+                    continue
+                matches.append({
+                    "name": metadata.get("name", ""),
+                    "type": metadata.get("type", ""),
+                    "description": metadata.get("description", ""),
+                    "source_id": metadata.get("source_id", ""),
+                    "filepath": metadata.get("filepath", ""),
+                    "score": self._distance_to_similarity(distances[index] if index < len(distances) else None),
+                })
+        return matches[:n_results]
+
+    def _native_relation_search(self, text: str, n_results: int) -> List[Dict[str, Any]]:
+        rows = self.relation_vectors.query(text=text, n_results=n_results) or []
+        matches: List[Dict[str, Any]] = []
+        for row in rows:
+            metadatas = self._flatten_query_values(row.get("metadatas"))
+            distances = self._flatten_query_values(row.get("distances"))
+            for index, metadata in enumerate(metadatas):
+                if not isinstance(metadata, dict):
+                    continue
+                matches.append({
+                    "source_name": metadata.get("source_name", ""),
+                    "target_name": metadata.get("target_name", ""),
+                    "description": metadata.get("description", ""),
+                    "keywords": metadata.get("keywords", ""),
+                    "weight": metadata.get("weight", 0),
+                    "source_id": metadata.get("source_id", ""),
+                    "filepath": metadata.get("filepath", ""),
+                    "score": self._distance_to_similarity(distances[index] if index < len(distances) else None),
+                })
+        return matches[:n_results]
+
+    def _rank_records(
+        self,
+        *,
+        query_text: str,
+        cache: List[Tuple[Dict[str, Any], List[float]]],
+        n_results: int,
+    ) -> List[Dict[str, Any]]:
+        if not query_text or not cache or n_results <= 0:
+            return []
+        query_embedding = self.embedder.embed_texts([query_text])[0]
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for record, embedding in cache:
+            score = self._cosine_similarity(query_embedding, embedding)
+            scored.append((score, record))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [{**record, "score": score} for score, record in scored[:n_results]]
+
+    def search_chunks(self, text: str, n_results: int = 5) -> List[Dict[str, Any]]:
+        if not self._prefer_python_vector_search:
+            try:
+                return self._native_chunk_search(text=text, n_results=n_results)
+            except Exception:
+                pass
+        if self._chunk_search_cache is None:
+            chunks = self.chunksdb.list_chunks()
+            texts = [chunk.get("text", "") or "" for chunk in chunks]
+            embeddings = self.embedder.embed_texts(texts) if texts else []
+            self._chunk_search_cache = list(zip(chunks, embeddings))
+        return self._rank_records(query_text=text, cache=self._chunk_search_cache, n_results=n_results)
+
+    def search_entities(self, text: str, n_results: int = 5) -> List[Dict[str, Any]]:
+        if not self._prefer_python_vector_search:
+            try:
+                return self._native_entity_search(text=text, n_results=n_results)
+            except Exception:
+                pass
+        if self._entity_search_cache is None:
+            entities = self.graphdb.list_nodes()
+            texts = [
+                EntityVectors._embed_text(
+                    entity.get("name", ""),
+                    entity.get("type", "") or "",
+                    entity.get("description", "") or "",
+                )
+                for entity in entities
+            ]
+            embeddings = self.embedder.embed_texts(texts) if texts else []
+            self._entity_search_cache = list(zip(entities, embeddings))
+        return self._rank_records(query_text=text, cache=self._entity_search_cache, n_results=n_results)
+
+    def search_relations(self, text: str, n_results: int = 5) -> List[Dict[str, Any]]:
+        if not self._prefer_python_vector_search:
+            try:
+                return self._native_relation_search(text=text, n_results=n_results)
+            except Exception:
+                pass
+        if self._relation_search_cache is None:
+            relations = self.graphdb.list_edges()
+            texts = [
+                RelationVectors._embed_text(
+                    relation.get("source_name", ""),
+                    relation.get("target_name", ""),
+                    relation.get("description", "") or "",
+                    relation.get("keywords", "") or "",
+                )
+                for relation in relations
+            ]
+            embeddings = self.embedder.embed_texts(texts) if texts else []
+            self._relation_search_cache = list(zip(relations, embeddings))
+        return self._rank_records(query_text=text, cache=self._relation_search_cache, n_results=n_results)
 
     def get_llm_cache(self, model: str, prompt_sha: str, text_sha: str, max_age_hours: int) -> Optional[str]:
         return self.documentsdb.get_llm_cache(model, prompt_sha, text_sha, max_age_hours)
@@ -1049,17 +1295,23 @@ class Storage:
     # 2) Chunks schema
     def add_chunks(self, chunks: Sequence[Dict[str, Any]]) -> None:
         self.chunksdb.add_chunks(chunks)
+        self._invalidate_chunk_cache()
 
     # 3) Knowledge Graph schema
     def add_kg_nodes(self, nodes: List[Dict[str, Any]]) -> None:
         self.graphdb.add_nodes(nodes)
+        self._invalidate_entity_cache()
 
     def add_kg_edges(self, edges: List[Dict[str, Any]]) -> None:
         self.graphdb.add_edges(edges)
+        self._invalidate_relation_cache()
 
     # 4) Chunk vectors
     def add_chunk_vectors(self, chunks: Sequence[Dict[str, Any]]) -> None:
         if chunks:
+            if self._vector_mutations_disabled:
+                self._warn_vector_backend_disabled()
+                return
             self.chunk_vectors.add_chunks(chunks)
 
     # 5) Entity vectors
@@ -1069,6 +1321,9 @@ class Storage:
         Uniqueness enforced via entity name.
         """
         if entities:
+            if self._vector_mutations_disabled:
+                self._warn_vector_backend_disabled()
+                return
             self.entity_vectors.add_entities(entities)
 
     # 6) Relation vectors
@@ -1079,6 +1334,9 @@ class Storage:
         Uniqueness enforced via normalized ID "min::max".
         """
         if relations:
+            if self._vector_mutations_disabled:
+                self._warn_vector_backend_disabled()
+                return
             self.relation_vectors.add_relations(relations)
 
     # ---------- Get-only APIs ----------
@@ -1134,6 +1392,8 @@ class Storage:
 
     # 4) Chunk Vectors
     def get_chunk_vector(self, chunk_uuid: str) -> Optional[Dict[str, Any]]:
+        if self._vector_mutations_disabled:
+            return None
         return self.chunk_vectors.get([chunk_uuid])
 
     # 5) Entity Vectors
@@ -1144,11 +1404,15 @@ class Storage:
         """
         if not names:
             return []
+        if self._vector_mutations_disabled:
+            return []
         return self.entity_vectors.get_entities(names)
 
 
     # 6) Relation Vectors
     def get_relations(self, pairs: List[Tuple[str, str]]) -> Optional[Dict[str, Any]]:
+        if self._vector_mutations_disabled:
+            return []
         return self.relation_vectors.get_relations(pairs)
 
     # ---------- Delete-only APIs ----------
@@ -1160,12 +1424,15 @@ class Storage:
     # 2) Chunks
     def delete_chunks_by_doc_id(self, doc_id: str) -> None:
         self.chunksdb.delete_chunks_by_doc_id(doc_id)
+        self._invalidate_chunk_cache()
 
     def delete_chunk_by_uuid(self, chunk_uuid: str) -> None:
         self.chunksdb.delete_chunk_by_uuid(chunk_uuid)
+        self._invalidate_chunk_cache()
 
     def delete_chunks_by_uuids(self, chunk_uuids: List[str]) -> None:
         self.chunksdb.delete_chunks_by_uuids(chunk_uuids)
+        self._invalidate_chunk_cache()
 
     # 3) Graph
     def delete_node(self, name: str) -> None:
@@ -1173,21 +1440,27 @@ class Storage:
         Pass-through: delete one graph node by name.
         """
         self.graphdb.delete_node(name)
+        self._invalidate_entity_cache()
 
     def delete_nodes(self, names: List[str]) -> None:
         """
         Pass-through: bulk delete graph nodes by name.
         """
         self.graphdb.delete_nodes(names)
+        self._invalidate_entity_cache()
 
     def delete_edge(self, source_name: str, target_name: str) -> None:
         self.graphdb.delete_edge(source_name, target_name)
+        self._invalidate_relation_cache()
 
     def delete_edges(self, pairs: List[Tuple[str, str]]) -> None:
         self.graphdb.delete_edges(pairs)
+        self._invalidate_relation_cache()
 
     # 4) Chunk Vectors
     def delete_chunk_vector(self, chunk_uuid: str) -> None:
+        if self._vector_mutations_disabled:
+            return
         self.chunk_vectors.delete([chunk_uuid])
 
     # 5) Entity Vectors
@@ -1197,10 +1470,14 @@ class Storage:
         """
         if not names:
             return
+        if self._vector_mutations_disabled:
+            return
         self.entity_vectors.delete_entities(names)
 
     # 6) Relation Vectors
     def delete_relation_vector(self, pairs: List[Tuple[str, str]]) -> None:
+        if self._vector_mutations_disabled:
+            return
         self.relation_vectors.delete_relations(pairs)
 
     # ---------- Update and Upsert APIs ----------
@@ -1212,6 +1489,7 @@ class Storage:
     # 2) Chunks
     def upsert_chunk(self, chunk_uuid: str, updates: Dict[str, Any]) -> None:
         self.chunksdb.update_chunk(chunk_uuid, updates)
+        self._invalidate_chunk_cache()
 
     # 3) Graph
     def upsert_node(self, name: str, updates: Dict[str, Any]) -> None:
@@ -1247,6 +1525,7 @@ class Storage:
             self.graphdb.add_nodes(to_add)
         if to_update:
             self.graphdb.update_nodes(to_update)
+        self._invalidate_entity_cache()
 
     def upsert_edge(self, source_name: str, target_name: str, updates: Dict[str, Any]) -> None:
         self.graphdb.update_edge(source_name, target_name, updates)
@@ -1264,15 +1543,31 @@ class Storage:
             self.graphdb.add_edges(to_add)
         if to_update:
             self.graphdb.update_edges(to_update)
+        self._invalidate_relation_cache()
 
     # 4) Chunk Vectors
     def upsert_chunk_vector(self, chunks: Sequence[Dict[str, Any]]) -> None:
+        if self._vector_mutations_disabled:
+            self._warn_vector_backend_disabled()
+            self._invalidate_chunk_cache()
+            return
         self.chunk_vectors.upsert(chunks)
+        self._invalidate_chunk_cache()
 
     # 5) Entity Vectors
     def upsert_entity_vector(self, entities: List[Dict[str, Any]]) -> None:
+        if self._vector_mutations_disabled:
+            self._warn_vector_backend_disabled()
+            self._invalidate_entity_cache()
+            return
         self.entity_vectors.upsert_entities(entities)
+        self._invalidate_entity_cache()
 
     # 6) Relation Vectors
     def upsert_relation_vector(self, relations: List[Dict[str, Any]]) -> None:
+        if self._vector_mutations_disabled:
+            self._warn_vector_backend_disabled()
+            self._invalidate_relation_cache()
+            return
         self.relation_vectors.upsert_relations(relations)
+        self._invalidate_relation_cache()

@@ -211,6 +211,51 @@ It appears some entities may have still been missed.
 Answer ONLY by `YES` OR `NO` if there are still entities that need to be added.
 """.strip()
 
+PROMPTS["entity_extraction_audit"] = """---Role---
+
+You are auditing an information extraction result for completeness.
+
+---Goal---
+
+Review the source text and the initial extraction. Report possible missing entities or relationships, but do not rewrite or replace the original extraction.
+Use {language} for any natural-language explanations.
+
+---Instructions---
+
+- Focus only on entities of these types: [{entity_types}]
+- Review the initial extraction carefully before reporting gaps.
+- Only report candidates that appear to be missing from the original extraction.
+- If nothing important appears missing, return empty arrays.
+- Output valid JSON only.
+
+---Source Text---
+{input_text}
+
+---Initial Extraction---
+{initial_extraction}
+
+---Required JSON Schema---
+{{
+  "missing_entities": [
+    {{
+      "name": "entity name",
+      "type": "entity type",
+      "reason": "why this looks missing"
+    }}
+  ],
+  "missing_relationships": [
+    {{
+      "source_name": "source entity",
+      "target_name": "target entity",
+      "reason": "why this relationship looks missing"
+    }}
+  ],
+  "summary": "short audit summary"
+}}
+
+JSON:
+"""
+
 PROMPTS["fail_response"] = (
     "Sorry, I'm not able to provide an answer to that question.[no-context]"
 )
@@ -384,6 +429,9 @@ When handling content with timestamps:
 - Addtional user prompt: {user_prompt}
 
 Response:"""
+
+PROMPTS["lightrag_response"] = PROMPTS["rag_response"]
+PROMPTS["rag_response_naive"] = PROMPTS["naive_rag_response"]
 
 PROMPTS["summarize_text"] = """---Role---
 You are a helpful assistant responsible for generating a concise summary of the data provided below.

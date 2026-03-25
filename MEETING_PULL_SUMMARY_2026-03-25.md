@@ -131,19 +131,6 @@ Why this matters:
 - `test/test_graph_pickle.py`
 - `test/test_chunker.py`
 
-## Local-Only Artifacts That Should Not Be Part of a Pull
-
-These exist in the working tree but look like local runtime or test artifacts, not pull candidates:
-
-- `.venv2/`
-- `docs/.appl-kgraph/`
-- `docs2/`
-
-One tracked non-code change also needs discussion:
-
-- `docs_store/UDHR_first_article_all.txt` is currently deleted in the diff
-  - This does not look like part of the architectural work and should be reviewed before any pull request is prepared.
-
 ## Why the Changes Are Good
 
 - The system is easier to reason about because project selection now maps directly to storage layout.
@@ -181,14 +168,4 @@ One tracked non-code change also needs discussion:
   - Functionally, many of the changes are reasonable.
   - Review-wise, this may still be easier to land if split into smaller pull requests.
 
-## Suggested Pull Framing
-
-If this work is to be proposed upstream, the cleanest framing would probably be:
-
-- project-aware ingestion and storage
-- project-aware UI and graph pickle restoration
-- structured QA logging and graph snapshot support
-- extraction and chunking cleanups
-- Windows/Python 3.12 Chroma safety workaround
-
-That would make it easier to discuss what is foundational, what is convenience/UI, and what is environment-specific stabilization.
+#

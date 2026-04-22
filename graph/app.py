@@ -24,13 +24,18 @@ from project_paths import (
     resolve_project_paths,
 )
 
+# =====================================================
+# -------- INITIAL RANDOM GRAPH CREATION --------------
+# =====================================================
 
 mygraph = nx.Graph()
 _PATHRAG_CACHE: dict[str, PathRAG] = {}
 _LIGHTRAG_CACHE: dict[str, LightRAG] = {}
 
-
-def generate_dynamic_type_colors(graph: nx.Graph) -> dict[str, str]:
+# =====================================================
+# -------- DYNAMIC COLOR GENERATION -------------------
+# =====================================================
+def generate_dynamic_type_colors(graph):
     types = sorted(set(data.get("type", "Unknown") for _, data in graph.nodes(data=True)))
     if not types:
         return {}

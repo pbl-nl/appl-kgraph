@@ -5,7 +5,8 @@ import uuid
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Sequence, Tuple, Optional, Union
 from collections import Counter, defaultdict
-
+import os
+# local imports
 from db_storage import Storage, _normalize_pair
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
@@ -279,7 +280,7 @@ def group_nodes(storage: Storage, nodes: List[Dict[str, Any]]) -> List[Dict[str,
     majority vote among all available hints (incoming + existing rows).
     """
 
-    delim = settings.ingestion.delimiter
+    delim = settings.settings.ingestion.delimiter
     grouped: Dict[str, Dict[str, Any]] = {}
 
     for n in nodes:
@@ -374,7 +375,7 @@ def group_edges(storage: Storage, edges: List[Dict[str, Any]]) -> List[Dict[str,
       - Keywords provided as comma-separated strings are normalized once into delimiter-joined sets.
       - Uses _normalize_pair() to ensure undirected uniqueness is consistent with the DB/vector IDs.
     """
-    delim = settings.ingestion.delimiter
+    delim = settings.settings.ingestion.delimiter
 
     # 1) group incoming by normalized undirected pair
     grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
@@ -449,7 +450,7 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     merged_entities = []
     entities = group_nodes(storage, entities)
     for ent in entities:
-        if len(ent["description"].split("||")) > settings.ingestion.description_segment_limit:
+        if len(ent["description"].split("||")) > settings.settings.ingestion.description_segment_limit:
             ent["description"] = llm_summarize_text(ent["description"])
         merged_entities.append(ent)
 
@@ -457,7 +458,7 @@ def merge_graph_data(storage: Storage, entities: List[Dict[str, Any]], relations
     merged_relations = []
     relations = group_edges(storage, relations)
     for rel in relations:
-        if len(rel["description"].split("||")) > settings.ingestion.description_segment_limit:
+        if len(rel["description"].split("||")) > settings.settings.ingestion.description_segment_limit:
             rel["description"] = llm_summarize_text(rel["description"])
         merged_relations.append(rel)
 
@@ -556,7 +557,7 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
     LOGGER.info("Found %d chunks to process for %s", len(chunk_uuids), filename)
 
     # Step 2: Process GraphDB - update nodes and edges
-    delim = settings.ingestion.delimiter
+    delim = settings.settings.ingestion.delimiter
     nodes_to_update: List[Dict[str, Any]] = []
     nodes_to_delete: List[str] = []
     edges_to_update: List[Dict[str, Any]] = []

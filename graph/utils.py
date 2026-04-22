@@ -84,8 +84,17 @@ def env_int(key: str, default: int) -> int:
     except ValueError:
         return default
 
-
 def env_float(key: str, default: float) -> float:
+    """
+    Reads a float environment variable with fallback to default.
+
+    Args:
+        key (str): The environment variable name.
+        default (float): Default value if not found or invalid.
+
+    Returns:
+        float: The parsed float value or default.
+    """
     val = env_str(key)
     if val is None or val == "":
         return default
@@ -94,14 +103,33 @@ def env_float(key: str, default: float) -> float:
     except ValueError:
         return default
 
-
 def env_bool(key: str, default: bool) -> bool:
+    """
+    Reads a boolean environment variable with fallback to default.
+
+    Args:
+        key (str): The environment variable name.
+        default (bool): Default value if not found.
+
+    Returns:
+        bool: True if value is in {"1", "true", "yes", "y", "t"}, otherwise default.
+    """
     val = env_str(key)
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "yes", "y", "t"}
 
-
 def env_list(key: str, default_csv: str, sep: str = ",") -> List[str]:
+    """
+    Reads a delimited list environment variable.
+
+    Args:
+        key (str): The environment variable name.
+        default_csv (str): Default comma-separated value string.
+        sep (str, optional): Delimiter character. Defaults to ",".
+
+    Returns:
+        List[str]: List of trimmed non-empty values.
+    """
     raw = env_str(key, default_csv) or ""
-    return [item.strip() for item in raw.split(sep) if item.strip()]
+    return [x.strip() for x in raw.split(sep) if x.strip()]

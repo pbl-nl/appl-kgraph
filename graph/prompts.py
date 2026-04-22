@@ -260,7 +260,7 @@ PROMPTS["fail_response"] = (
     "Sorry, I'm not able to provide an answer to that question.[no-context]"
 )
 
-PROMPTS["rag_response"] = """---Role---
+PROMPTS["lightrag_response"] = """---Role---
 
 You are a helpful assistant responding to user query about Knowledge Graph and Document Chunks provided in JSON format below.
 
@@ -287,7 +287,6 @@ When handling relationships with timestamps:
 - Use markdown formatting with appropriate section headings
 - Please respond in the same language as the user's question.
 - Ensure the response maintains continuity with the conversation history.
-- List up to 5 most important reference sources at the end under "References" section. Clearly indicating whether each source is from Knowledge Graph (KG) or Document Chunks (DC), and include the file path if available, in the following format: [KG/DC] file_path
 - If you don't know the answer, just say so.
 - Do not make anything up. Do not include information not provided by the Knowledge Base.
 - Additional user prompt: {user_prompt}
@@ -323,7 +322,6 @@ When handling relationships with timestamps:
 - Please respond in the same language as the user's question.
 - Ensure the response maintains continuity with the conversation history.
 - When helpful and relevant, synthesize information from multi-hop paths and indirect connections in the Knowledge Graph.
-- List up to 5 most important reference sources at the end under a "References" section. Clearly indicate whether each source is from the Knowledge Graph (KG) or from Document Chunks (DC), and include the file path if available, using the following format: [KG/DC] file_path
 - If you don't know the answer, say so directly.
 - Do not make anything up. Do not include information not provided by the Knowledge Base.
 - Additional user prompt: {user_prompt}

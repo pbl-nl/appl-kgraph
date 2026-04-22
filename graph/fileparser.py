@@ -11,7 +11,7 @@ from langchain_community.document_loaders import BSHTMLLoader
 from langchain_community.document_loaders import TextLoader
 from settings import VALID_EXTENSIONS
 import utils as ut
-
+import settings
 
 class FileParser:
     """
@@ -19,6 +19,7 @@ class FileParser:
     and returns pages and metadata in a standardized format.
     """
     
+    # Can we throw this one away? Yes?
     SUPPORTED_EXTENSIONS = {ext.lower() for ext in VALID_EXTENSIONS}
 
     def parse_file(self, filepath: Union[str, Path]) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
@@ -44,9 +45,9 @@ class FileParser:
             raise FileNotFoundError(f"File not found: {filepath}")
         
         extension = filepath.suffix.lower()
-        if extension not in self.SUPPORTED_EXTENSIONS:
+        if extension not in settings.VALID_EXTENSIONS:
             raise ValueError(f"Unsupported file extension: {extension}. "
-                           f"Supported extensions: {', '.join(self.SUPPORTED_EXTENSIONS)}")
+                           f"Supported extensions: {', '.join(settings.VALID_EXTENSIONS)}")
         
         # Get basic metadata
         stat = filepath.stat()
@@ -200,8 +201,8 @@ class FileParser:
     
     def _parse_docx_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """Parse DOCX files"""
-        path_to_pdf = self.convert_docx_to_pdf(filepath)
-        pages, metadata = self._parse_pdf_file(path_to_pdf)
+        path_to_pdf = self.convert_docx_to_pdf(str(filepath))
+        pages, metadata = self._parse_pdf_file(Path(path_to_pdf))
         os.remove(path_to_pdf)  # Clean up the temporary PDF file
         return pages, metadata
         

@@ -9,6 +9,7 @@ from docx2pdf import convert
 from typing import List, Tuple, Dict, Any, Union
 from langchain_community.document_loaders import BSHTMLLoader
 from langchain_community.document_loaders import TextLoader
+from settings import VALID_EXTENSIONS
 import utils as ut
 import settings
 
@@ -18,8 +19,8 @@ class FileParser:
     and returns pages and metadata in a standardized format.
     """
     
-    def __init__(self):
-        pass
+    # Can we throw this one away? Yes?
+    SUPPORTED_EXTENSIONS = {ext.lower() for ext in VALID_EXTENSIONS}
 
     def parse_file(self, filepath: Union[str, Path]) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """
@@ -53,10 +54,10 @@ class FileParser:
         metadata = {
             'doc_id': str(uuid.uuid4()),
             'filename': filepath.name,
-            'filepath': str(filepath.absolute()),
+            'filepath': str(filepath.resolve()),
             'file_size': stat.st_size,
             'last_modified': stat.st_mtime,
-            'created': stat.st_birthtime,
+            'created': getattr(stat, "st_birthtime", stat.st_ctime),
             'extension': extension,
             'mime_type': mimetypes.guess_type(str(filepath))[0]
         }
@@ -83,9 +84,18 @@ class FileParser:
     
     def _parse_text_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """Parse text files (.txt)"""
-        loader = TextLoader(file_path=filepath, autodetect_encoding=True)
-        text = loader.load()
-        raw_text = text[0].page_content
+        encodings_to_try = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
+        raw_text = None
+        for encoding in encodings_to_try:
+            try:
+                raw_text = filepath.read_text(encoding=encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if raw_text is None:
+            loader = TextLoader(file_path=filepath, autodetect_encoding=False, encoding="utf-8")
+            text = loader.load()
+            raw_text = text[0].page_content
         # txt files do not have multiple pages
         pages = [(0, raw_text)]
         # extract metadata
@@ -220,4 +230,3 @@ class FileParser:
         convert(input_path=docx_path, output_path=pdf_path, keep_active=False)
 
         return pdf_path
-

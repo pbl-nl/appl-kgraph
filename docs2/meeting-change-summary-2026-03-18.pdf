@@ -1,0 +1,271 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 3 0 R 5 0 R ] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R /F2 8 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 3009 >>
+stream
+BT
+/F2 18 Tf
+1 0 0 1 72 740 Tm
+(APPL-KGraph Change Summary) Tj
+/F1 11 Tf
+1 0 0 1 72 712 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 693 Tm
+(Date: 18 March 2026) Tj
+/F1 11 Tf
+1 0 0 1 72 677 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 658 Tm
+(This is a short working summary of what changed in the codebase from the earlier) Tj
+/F1 11 Tf
+1 0 0 1 72 642 Tm
+(baseline to the current state. The goal is to make the recent direction easy to) Tj
+/F1 11 Tf
+1 0 0 1 72 626 Tm
+(explain in a meeting without walking through every file.) Tj
+/F1 11 Tf
+1 0 0 1 72 610 Tm
+() Tj
+/F2 13 Tf
+1 0 0 1 72 591 Tm
+(What changed) Tj
+/F1 11 Tf
+1 0 0 1 72 570 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 551 Tm
+(? The system moved from mostly global storage to project-scoped storage under) Tj
+/F1 11 Tf
+1 0 0 1 72 535 Tm
+(  each selected document folder.) Tj
+/F1 11 Tf
+1 0 0 1 72 519 Tm
+(? Ingestion, retrieval, logs, audits, and graph artifacts now all have a) Tj
+/F1 11 Tf
+1 0 0 1 72 503 Tm
+(  project-aware path model.) Tj
+/F1 11 Tf
+1 0 0 1 72 487 Tm
+(? The extraction flow now carries language information forward so entity prompts) Tj
+/F1 11 Tf
+1 0 0 1 72 471 Tm
+(  can adapt to the chunk or document language.) Tj
+/F1 11 Tf
+1 0 0 1 72 455 Tm
+(? Query logging was added in structured JSON form so question-answer runs can be) Tj
+/F1 11 Tf
+1 0 0 1 72 439 Tm
+(  inspected after the fact.) Tj
+/F1 11 Tf
+1 0 0 1 72 423 Tm
+(? A second-pass extraction audit path was introduced so we can inspect likely) Tj
+/F1 11 Tf
+1 0 0 1 72 407 Tm
+(  missing entities and relationships without overwriting the first pass.) Tj
+/F1 11 Tf
+1 0 0 1 72 391 Tm
+(? Chunk overlap behavior was tightened so repeated overlap does not cascade) Tj
+/F1 11 Tf
+1 0 0 1 72 375 Tm
+(  across later chunks.) Tj
+/F1 11 Tf
+1 0 0 1 72 359 Tm
+() Tj
+/F2 13 Tf
+1 0 0 1 72 340 Tm
+(Why this was worth doing) Tj
+/F1 11 Tf
+1 0 0 1 72 319 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 300 Tm
+(? It prevents different corpora from sharing one storage root by accident.) Tj
+/F1 11 Tf
+1 0 0 1 72 284 Tm
+(? It gives us a cleaner path toward folder or project selection in the UI.) Tj
+/F1 11 Tf
+1 0 0 1 72 268 Tm
+(? It makes debugging retrieval behavior much easier because the question,) Tj
+/F1 11 Tf
+1 0 0 1 72 252 Tm
+(  answer, and evidence trail are now logged.) Tj
+/F1 11 Tf
+1 0 0 1 72 236 Tm
+(? It reduces hidden prompt assumptions in multilingual data.) Tj
+/F1 11 Tf
+1 0 0 1 72 220 Tm
+(? It makes the graph and ingestion outputs easier to reason about as artifacts) Tj
+/F1 11 Tf
+1 0 0 1 72 204 Tm
+(  of one specific document set.) Tj
+/F1 11 Tf
+1 0 0 1 72 188 Tm
+() Tj
+/F2 13 Tf
+1 0 0 1 72 169 Tm
+(UI and graph workflow changes) Tj
+/F1 11 Tf
+1 0 0 1 72 148 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 129 Tm
+(? The Gradio app was simplified around a selected document folder as the active) Tj
+/F1 11 Tf
+1 0 0 1 72 113 Tm
+(  project.) Tj
+/F1 11 Tf
+1 0 0 1 72 97 Tm
+(? The graph editing workflow is being preserved, but now it lives inside the) Tj
+/F1 11 Tf
+1 0 0 1 72 81 Tm
+(  project artifact directory instead of a single global pickle file.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R /F2 8 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 2715 >>
+stream
+BT
+/F1 11 Tf
+1 0 0 1 72 740 Tm
+(? We are now separating two graph pickle roles:) Tj
+/F1 11 Tf
+1 0 0 1 72 724 Tm
+(- `kg.pkl` is the editable working graph used for manual graph exploration and) Tj
+/F1 11 Tf
+1 0 0 1 72 708 Tm
+(edits.) Tj
+/F1 11 Tf
+1 0 0 1 72 692 Tm
+(- `kg_retrieval.pkl` is the retrieval snapshot built from canonical SQLite graph) Tj
+/F1 11 Tf
+1 0 0 1 72 676 Tm
+(storage.) Tj
+/F1 11 Tf
+1 0 0 1 72 660 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 641 Tm
+(This split matters because it lets people keep a working graph copy without silently) Tj
+/F1 11 Tf
+1 0 0 1 72 625 Tm
+(changing retrieval behavior.) Tj
+/F1 11 Tf
+1 0 0 1 72 609 Tm
+() Tj
+/F2 13 Tf
+1 0 0 1 72 590 Tm
+(Retrieval and KG storage) Tj
+/F1 11 Tf
+1 0 0 1 72 569 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 550 Tm
+(? Retrieval still uses SQLite and Chroma as the canonical source of truth for) Tj
+/F1 11 Tf
+1 0 0 1 72 534 Tm
+(  documents, chunks, vectors, and graph schema.) Tj
+/F1 11 Tf
+1 0 0 1 72 518 Tm
+(? The retrieval pickle is only a graph snapshot cache for faster or simpler) Tj
+/F1 11 Tf
+1 0 0 1 72 502 Tm
+(  graph loading.) Tj
+/F1 11 Tf
+1 0 0 1 72 486 Tm
+(? If the retrieval pickle is missing, the system should rebuild the graph view) Tj
+/F1 11 Tf
+1 0 0 1 72 470 Tm
+(  from SQLite and continue working.) Tj
+/F1 11 Tf
+1 0 0 1 72 454 Tm
+() Tj
+/F2 13 Tf
+1 0 0 1 72 435 Tm
+(Remaining mismatches and risks) Tj
+/F1 11 Tf
+1 0 0 1 72 414 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 395 Tm
+(? The current second-pass audit reports possible missing entities and) Tj
+/F1 11 Tf
+1 0 0 1 72 379 Tm
+(  relationships, but it does not yet merge those additions back into the) Tj
+/F1 11 Tf
+1 0 0 1 72 363 Tm
+(  canonical graph.) Tj
+/F1 11 Tf
+1 0 0 1 72 347 Tm
+(? Some ingestion logic still keys off filenames rather than full file paths,) Tj
+/F1 11 Tf
+1 0 0 1 72 331 Tm
+(  which is risky if two files with the same name exist in different subfolders.) Tj
+/F1 11 Tf
+1 0 0 1 72 315 Tm
+(? UI graph edits are still intentionally separate from canonical retrieval) Tj
+/F1 11 Tf
+1 0 0 1 72 299 Tm
+(  storage unless we later add an explicit sync/import step.) Tj
+/F1 11 Tf
+1 0 0 1 72 283 Tm
+() Tj
+/F2 13 Tf
+1 0 0 1 72 264 Tm
+(Bottom line) Tj
+/F1 11 Tf
+1 0 0 1 72 243 Tm
+() Tj
+/F1 11 Tf
+1 0 0 1 72 224 Tm
+(The recent work made the architecture more explicit and more maintainable. The) Tj
+/F1 11 Tf
+1 0 0 1 72 208 Tm
+(biggest improvement is that the selected document folder now genuinely defines the) Tj
+/F1 11 Tf
+1 0 0 1 72 192 Tm
+(active project and its artifacts. The main follow-up decision is whether manual) Tj
+/F1 11 Tf
+1 0 0 1 72 176 Tm
+(graph edits or second-pass extraction findings should eventually flow back into the) Tj
+/F1 11 Tf
+1 0 0 1 72 160 Tm
+(canonical retrieval graph.) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>
+endobj
+8 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000010 00000 n 
+0000000062 00000 n 
+0000000130 00000 n 
+0000000269 00000 n 
+0000003332 00000 n 
+0000003471 00000 n 
+0000006240 00000 n 
+0000006315 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+6389
+%%EOF

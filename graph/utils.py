@@ -1,80 +1,81 @@
+from __future__ import annotations
+
 import os
-from typing import List, Optional, Literal
-from langdetect import detect, LangDetectException
+from typing import List, Optional
+
+from langdetect import LangDetectException, detect
+
+
+LANGUAGE_NAME_MAP = {
+    "ar": "Arabic",
+    "de": "German",
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "nl": "Dutch",
+    "pt": "Portuguese",
+    "zh": "Chinese",
+    "zh-cn": "Chinese",
+    "zh-tw": "Chinese Traditional",
+}
+
 
 def detect_language(text: str, num_chars: int = 1000) -> str:
     """
-    Detects the language of a text based on a sample of its characters.
-
-    Args:
-        text (str): The input text to analyze for language detection.
-        num_chars (int, optional): The number of characters from the beginning
-            of the text to use for detection. Defaults to 1000.
-
-    Returns:
-        str: A language code (e.g., 'en' for English, 'fr' for French) or 'unknown'
-            if the language cannot be detected or if the text is empty.
+    Detect a language code from the leading portion of a text.
     """
     text_snippet = text[:num_chars] if len(text) > num_chars else text
 
     if not text_snippet.strip():
-        # Handle the case where the text snippet is empty or only contains whitespace
-        return 'unknown'
+        return "unknown"
+
     try:
         return detect(text_snippet)
-    except LangDetectException as e:
-        if 'No features in text' in str(e):
-            # Handle the specific error where no features are found in the text
-            return 'unknown'
-    # Default return statement to ensure the function always returns a value
-    return 'unknown'
+    except LangDetectException as exc:
+        if "No features in text" in str(exc):
+            return "unknown"
+    return "unknown"
 
-# ─────────────────────────────────────────────────────────────
-# Small helpers to parse environment variables robustly
-# ─────────────────────────────────────────────────────────────
+
+def normalize_language_name(language: Optional[str], default: str = "English") -> str:
+    """
+    Convert a language code or free-form language string into a prompt-friendly name.
+    """
+    if not language:
+        return default
+
+    candidate = str(language).strip()
+    if not candidate:
+        return default
+
+    lowered = candidate.lower()
+    if lowered == "unknown":
+        return default
+    if lowered in LANGUAGE_NAME_MAP:
+        return LANGUAGE_NAME_MAP[lowered]
+    if len(candidate) <= 3 and candidate.islower():
+        return default
+    return candidate[:1].upper() + candidate[1:]
+
 
 def _strip_quotes(val: Optional[str]) -> Optional[str]:
-    """
-    Removes surrounding quotes from environment variable values.
-
-    Args:
-        val (Optional[str]): The value to process.
-
-    Returns:
-        Optional[str]: The value with quotes stripped, or None if input was None.
-    """
     if val is None:
         return None
-    v = val.strip()
-    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-        return v[1:-1]
-    return v
+    stripped = val.strip()
+    if (stripped.startswith('"') and stripped.endswith('"')) or (
+        stripped.startswith("'") and stripped.endswith("'")
+    ):
+        return stripped[1:-1]
+    return stripped
+
 
 def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
-    """
-    Reads a string environment variable with quote stripping.
-
-    Args:
-        key (str): The environment variable name.
-        default (Optional[str], optional): Default value if not found. Defaults to None.
-
-    Returns:
-        Optional[str]: The environment variable value or default.
-    """
     val = os.getenv(key)
     return _strip_quotes(val) if val is not None else default
 
+
 def env_int(key: str, default: int) -> int:
-    """
-    Reads an integer environment variable with fallback to default.
-
-    Args:
-        key (str): The environment variable name.
-        default (int): Default value if not found or invalid.
-
-    Returns:
-        int: The parsed integer value or default.
-    """
     val = env_str(key)
     if val is None or val == "":
         return default

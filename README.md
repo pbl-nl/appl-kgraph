@@ -1,5 +1,7 @@
 # appl-kgraph
 
+This project is being developed with **Python 3.12** as its intended local environment and runtime baseline.
+
 **appl-kgraph** is a modular **graph-based Retrieval-Augmented Generation (RAG)** system with pluggable retrieval strategies. It is designed for querying large document collections by combining classic vector-based retrieval with an explicit **knowledge graph** over entities and relations extracted from the source texts.
 
 The project builds on ideas from recent graph-based RAG research, most notably **LightRAG** and **PathRAG**, and provides a shared graph + vector indexing layer on top of which multiple retrieval strategies can be implemented, compared, and extended.
@@ -129,18 +131,20 @@ If your document collection includes `.docx` files, ensure that **Microsoft Word
 
 1. Open a terminal (Anaconda Prompt or standard shell)
 2. Navigate to the project root
-3. Create a virtual environment:
+3. Verify that your active interpreter is Python 3.12 before installing dependencies.
+4. Create a virtual environment with Python 3.12:
 
+   ```text
+   Windows: py -3.12 -m venv venv
+   macOS/Linux: python3.12 -m venv venv
    ```
-   python -m venv venv
-   ```
-4. Activate it:
+5. Activate it:
 
    * Windows: `venv\Scripts\activate`
    * macOS/Linux: `source venv/bin/activate`
-5. Install dependencies:
+6. Install dependencies:
 
-   ```
+   ```text
    pip install -r requirements.txt
    ```
 
@@ -150,8 +154,9 @@ If your document collection includes `.docx` files, ensure that **Microsoft Word
 
 From the project root, run:
 
-```
-python graph/main.py
+```text
+Windows: py -3.12 graph/main.py
+macOS/Linux: python3.12 graph/main.py
 ```
 
 This will execute the current end-to-end pipeline using the configured retrieval strategy.
@@ -176,6 +181,4 @@ If you use ideas, code, or design patterns from this project in academic or appl
 For questions, feedback, or collaboration inquiries, you can contact the maintainers at:
 
 📧 <a href='mailto:stefan.troost@pbl.nl, k.wittenberg@scp.nl'>Contact link</a>
-
-
 

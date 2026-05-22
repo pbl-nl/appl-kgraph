@@ -428,9 +428,6 @@ When handling content with timestamps:
 
 Response:"""
 
-PROMPTS["lightrag_response"] = PROMPTS["rag_response"]
-PROMPTS["rag_response_naive"] = PROMPTS["naive_rag_response"]
-
 PROMPTS["summarize_text"] = """---Role---
 You are a helpful assistant responsible for generating a concise summary of the data provided below.
 Given a text document, please provide a concise summary that captures the main points and key information.
@@ -441,6 +438,7 @@ Use {language} as output language.
 {text}
 #######
 Output:"""
+
 
 if __name__ == "__main__":
     import argparse

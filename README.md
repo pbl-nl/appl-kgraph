@@ -1,6 +1,6 @@
 # appl-kgraph
 
-This project is being developed with **Python 3.12** as its intended local environment and runtime baseline.
+This project is being developed with **Python 3.13** as its intended local environment and runtime baseline.
 
 **appl-kgraph** is a modular **graph-based Retrieval-Augmented Generation (RAG)** system with pluggable retrieval strategies. It is designed for querying large document collections by combining classic vector-based retrieval with an explicit **knowledge graph** over entities and relations extracted from the source texts.
 
@@ -131,12 +131,12 @@ If your document collection includes `.docx` files, ensure that **Microsoft Word
 
 1. Open a terminal (Anaconda Prompt or standard shell)
 2. Navigate to the project root
-3. Verify that your active interpreter is Python 3.12 before installing dependencies.
-4. Create a virtual environment with Python 3.12:
+3. Verify that your active interpreter is Python 3.13 before installing dependencies.
+4. Create a virtual environment with Python 3.13:
 
    ```text
-   Windows: py -3.12 -m venv venv
-   macOS/Linux: python3.12 -m venv venv
+   Windows: py -3.13 -m venv venv
+   macOS/Linux: python3.13 -m venv venv
    ```
 5. Activate it:
 

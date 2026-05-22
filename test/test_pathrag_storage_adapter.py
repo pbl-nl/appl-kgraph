@@ -1,41 +1,15 @@
+import os
 import sys
-import types
+from pathlib import Path
 
 import pytest
 
 
-_storage_module = types.ModuleType("storage")
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
+os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
+os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
-
-class _ImportStubStorage:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def init(self):  # pragma: no cover - simple stub
-        return None
-
-
-class _ImportStubPaths:
-    pass
-
-
-_storage_module.Storage = _ImportStubStorage
-_storage_module.StoragePaths = _ImportStubPaths
-sys.modules.setdefault("storage", _storage_module)
-
-_llm_module = types.ModuleType("llm")
-
-
-class _ImportStubChat:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def generate(self, *args, **kwargs):  # pragma: no cover - simple stub
-        return ""
-
-
-_llm_module.Chat = _ImportStubChat
-sys.modules.setdefault("llm", _llm_module)
+sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 
 from graph.pathrag import StorageAdapter
 
@@ -54,7 +28,7 @@ class _FakeStorage:
         self.relation_vectors = _FakeVector(responses["relations"])
         self.chunk_vectors = _FakeVector(responses["chunks"])
 
-    def init(self):  # pragma: no cover - simple stub
+    def init(self):
         return None
 
 
@@ -103,7 +77,7 @@ def fake_storage(monkeypatch):
         ],
     }
     storage = _FakeStorage(responses)
-    monkeypatch.setattr("graph.pathrag.IngestionStorage", lambda *args, **kwargs: storage)
+    monkeypatch.setattr("graph.pathrag.Storage", lambda *args, **kwargs: storage)
     return storage
 
 
@@ -111,14 +85,14 @@ def test_storage_adapter_query_helpers_expand_matches(fake_storage):
     adapter = StorageAdapter()
 
     entity_matches = adapter.query_entities("query", limit=5)
-    assert [m.name for m in entity_matches] == ["Entity One", "Entity Two"]
-    assert all(m.score > 0 for m in entity_matches)
+    assert [match.name for match in entity_matches] == ["Entity One", "Entity Two"]
+    assert all(match.score > 0 for match in entity_matches)
 
     relation_matches = adapter.query_relations("query", limit=5)
-    assert [m.source_name for m in relation_matches] == ["Entity One", "Entity Two"]
-    assert all(m.score > 0 for m in relation_matches)
+    assert [match.source_name for match in relation_matches] == ["Entity One", "Entity Two"]
+    assert all(match.score > 0 for match in relation_matches)
 
     chunk_matches = adapter.query_chunks("query", limit=5)
-    assert [m.chunk_uuid for m in chunk_matches] == ["chunk-1", "chunk-2"]
-    assert [m.text for m in chunk_matches] == ["text one", "text two"]
-    assert all(m.score > 0 for m in chunk_matches)
+    assert [match.chunk_uuid for match in chunk_matches] == ["chunk-1", "chunk-2"]
+    assert [match.text for match in chunk_matches] == ["text one", "text two"]
+    assert all(match.score > 0 for match in chunk_matches)

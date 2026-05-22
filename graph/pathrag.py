@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from collections import defaultdict
+from pathlib import Path
 
 import networkx as nx
 import tiktoken
@@ -17,6 +18,10 @@ from db_storage import Storage
 from db_storage import StoragePaths
 from llm import Chat
 from prompts import PROMPTS
+from logging_utils import configure_file_logger
+from graph_pickle import load_or_build_graph_snapshot
+from project_paths import ProjectPaths
+from query_logging import write_query_log
 
 
 LOGGER = logging.getLogger("PathRAG")
@@ -82,14 +87,13 @@ def render_full_context(result: RetrievalResult) -> str:
 # Logging and token helpers
 # ---------------------------------------------------------------------------
 
-def set_logger(log_file: str) -> None:
-    """Configure the package wide logger."""
-
-    LOGGER.setLevel(logging.INFO)
-    handler = logging.FileHandler(log_file)
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    if not LOGGER.handlers:
-        LOGGER.addHandler(handler)
+def set_logger(log_file: Path) -> None:
+    configure_file_logger(
+        "PathRAG",
+        log_file=log_file,
+        level=settings.logging.retrieval_level,
+        enabled=settings.logging.retrieval_enabled,
+    )
 
 
 @lru_cache(maxsize=4)
@@ -376,11 +380,17 @@ class GraphSnapshot:
 class StorageAdapter:
     """High level helper around the ingestion ``Storage`` facade."""
 
-    def __init__(self, paths: Optional[StoragePaths] = None):
+    def __init__(
+        self,
+        paths: Optional[StoragePaths] = None,
+        *,
+        graph_pickle_path: Optional[Path] = None,
+    ):
         self._storage = Storage(paths=paths)
         # Ensure tables exist before we start querying them.
         self._storage.init()
         self._graph_snapshot: Optional[GraphSnapshot] = None
+        self._graph_pickle_path = graph_pickle_path
 
     # ------------------------------------------------------------------
     # Graph helpers
@@ -397,52 +407,10 @@ class StorageAdapter:
         self._graph_snapshot = self._load_graph()
 
     def _load_graph(self) -> GraphSnapshot:
-        graph = nx.Graph()
-
-        with self._storage.graphdb.connect() as con:
-            node_rows = con.execute(
-                "SELECT name, type, description, source_id, filepath FROM nodes;"
-            ).fetchall()
-            edge_rows = con.execute(
-                "SELECT source_name, target_name, weight, description, keywords, "
-                "source_id, filepath FROM edges;"
-            ).fetchall()
-
-        for name, type_, description, source_id, filepath in node_rows:
-            node_id = (name or "").strip()
-            if not node_id:
-                continue
-            graph.add_node(
-                node_id,
-                type=(type_ or "unknown").strip() or "unknown",
-                description=(description or "").strip(),
-                source_id=(source_id or "").strip(),
-                filepath=(filepath or "").strip(),
-            )
-
-        for row in edge_rows:
-            source, target, weight, description, keywords, source_id, filepath = row
-            src_id = (source or "").strip()
-            tgt_id = (target or "").strip()
-            if not src_id or not tgt_id:
-                continue
-            if src_id not in graph or tgt_id not in graph:
-                LOGGER.debug("Skipping edge with missing endpoints: %s -> %s", src_id, tgt_id)
-                continue
-            graph.add_edge(
-                src_id,
-                tgt_id,
-                weight=float(weight) if weight is not None else 1.0,
-                description=(description or "").strip(),
-                keywords=(keywords or "").strip(),
-                source_id=(source_id or "").strip(),
-                filepath=(filepath or "").strip(),
-            )
-
-        LOGGER.debug(
-            "Loaded graph snapshot with %d nodes and %d edges",
-            graph.number_of_nodes(),
-            graph.number_of_edges(),
+        graph = load_or_build_graph_snapshot(
+            self._storage,
+            snapshot_path=self._graph_pickle_path,
+            logger=LOGGER,
         )
         return GraphSnapshot(graph=graph)
 
@@ -478,92 +446,61 @@ class StorageAdapter:
 
     def query_entities(self, text: str, limit: int = 5) -> List[EntityMatch]:
         """Query entity vector index and return EntityMatch objects."""
-        results = self._storage.entity_vectors.query(text=text, n_results=limit) or []
+        results = self._storage.search_entities(text=text, n_results=limit) or []
         matches: List[EntityMatch] = []
         if not results:
             return matches
 
-        # Chroma returns a single dict with lists
-        ids = results[0].get("ids", [])
-        metadatas = results[0].get("metadatas", [])
-        distances = results[0].get("distances", [])
-
-        for i, metadata in enumerate(metadatas):
+        for metadata in results:
             if not isinstance(metadata, dict):
                 continue
-            entity_id = ids[i] if i < len(ids) else ""
-            distance = distances[i] if i < len(distances) else None
             matches.append(
                 EntityMatch(
-                    name=metadata.get("name", entity_id),
+                    name=metadata.get("name", ""),
                     type=metadata.get("type"),
                     description=metadata.get("description", ""),
-                    score=_distance_to_similarity(distance),
+                    score=float(metadata.get("score", 0.0) or 0.0),
                 )
             )
         return matches
 
     def query_relations(self, text: str, limit: int = 5) -> List[RelationMatch]:
         """Query relation vector index and return RelationMatch objects."""
-        results = self._storage.relation_vectors.query(text=text, n_results=limit) or []
+        results = self._storage.search_relations(text=text, n_results=limit) or []
         matches: List[RelationMatch] = []
         if not results:
             return matches
 
-        ids = results[0].get("ids", [])
-        metadatas = results[0].get("metadatas", [])
-        distances = results[0].get("distances", [])
-
-        for i, metadata in enumerate(metadatas):
+        for metadata in results:
             if not isinstance(metadata, dict):
                 continue
-            distance = distances[i] if i < len(distances) else None
             matches.append(
                 RelationMatch(
                     source_name=metadata.get("source_name", ""),
                     target_name=metadata.get("target_name", ""),
                     description=metadata.get("description", ""),
                     keywords=metadata.get("keywords", ""),
-                    score=_distance_to_similarity(distance),
+                    score=float(metadata.get("score", 0.0) or 0.0),
                 )
             )
         return matches
 
 
     def query_chunks(self, text: str, limit: int = 5) -> List[ChunkMatch]:
-        results = self._storage.chunk_vectors.query(text=text, n_results=limit) or []
+        results = self._storage.search_chunks(text=text, n_results=limit) or []
         matches: List[ChunkMatch] = []
-        for result in results:
-            metadatas = self._as_list(result.get("metadatas"))
-            ids = self._as_list(result.get("ids"))
-            distances = self._as_list(result.get("distances"))
-            documents = self._as_list(result.get("documents"))
-            max_len = max(
-                (
-                    len(seq)
-                    for seq in (metadatas, ids, distances, documents)
-                    if seq
-                ),
-                default=0,
-            )
-            for index in range(max_len):
-                metadata = metadatas[index] if index < len(metadatas) else {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                chunk_id = ids[index] if index < len(ids) else ""
-                distance = distances[index] if index < len(distances) else None
-                document = documents[index] if index < len(documents) else ""
-                if not isinstance(document, str):
-                    document = str(document or "")
-                matches.append(
-                    ChunkMatch(
-                        chunk_uuid=str(chunk_id),
-                        document_id=str(metadata.get("doc_id", "")),
-                        filename=str(metadata.get("filename", "")),
-                        text=document,
-                        score=_distance_to_similarity(distance),
-                    )
+        for metadata in results:
+            if not isinstance(metadata, dict):
+                continue
+            matches.append(
+                ChunkMatch(
+                    chunk_uuid=str(metadata.get("chunk_uuid", "")),
+                    document_id=str(metadata.get("doc_id", "")),
+                    filename=str(metadata.get("filename", "")),
+                    text=str(metadata.get("text", "")),
+                    score=float(metadata.get("score", 0.0) or 0.0),
                 )
+            )
         return matches
 
     # ------------------------------------------------------------------
@@ -778,6 +715,25 @@ RAG_PROMPT = (
 )
 
 
+def _retrieval_model_metadata() -> Dict[str, Any]:
+    provider = settings.provider.provider
+    if provider == "azure":
+        return {
+            "provider": provider,
+            "model_name": settings.provider.azure_llm_deployment,
+            "model_version": settings.provider.azure_api_version,
+            "api_version": settings.provider.azure_api_version,
+            "endpoint": settings.provider.azure_endpoint,
+        }
+    return {
+        "provider": provider,
+        "model_name": settings.provider.openai_llm_model,
+        "model_version": settings.provider.openai_llm_model,
+        "api_version": "",
+        "endpoint": settings.provider.openai_base_url or "https://api.openai.com/v1",
+    }
+
+
 # ---------------------------------------------------------------------------
 # PathRAG entry point
 # ---------------------------------------------------------------------------
@@ -794,12 +750,35 @@ class PathRAG:
         self,
         *,
         storage_paths: Optional[StoragePaths] = None,
+        project_paths: Optional[ProjectPaths] = None,
         system_prompt: Optional[str] = None,
-        log_file: str = "PathRAG.log",
+        log_file: Optional[str] = None,
     ) -> None:
-        set_logger(log_file)
+        self._project_paths = project_paths
+        effective_storage_paths = (
+            storage_paths
+            if storage_paths is not None
+            else (project_paths.storage if project_paths is not None else None)
+        )
+        effective_log_file = (
+            Path(log_file)
+            if log_file is not None
+            else (
+                project_paths.pathrag_log_file
+                if project_paths is not None
+                else Path("PathRAG.log")
+            )
+        )
+        set_logger(effective_log_file)
         LOGGER.info("Initialising PathRAG retriever")
-        self._storage = StorageAdapter(paths=storage_paths)
+        self._storage = StorageAdapter(
+            paths=effective_storage_paths,
+            graph_pickle_path=(
+                project_paths.retrieval_graph_pickle_file
+                if project_paths is not None
+                else None
+            ),
+        )
         self._chat = RetrieveChat(system_prompt=system_prompt)
 
     # ------------------------------------------------------------------
@@ -935,13 +914,69 @@ class PathRAG:
             max_tokens=settings.retrieval.llm_max_tokens,
             temperature=settings.retrieval.llm_temperature,
         )
-        return RetrievalResult(
+        result = RetrievalResult(
             answer=answer,
             context_windows=context_windows,
             entity_matches=entity_matches,
             relation_matches=relation_matches,
             chunk_matches=chunk_matches,
         )
+        if settings.logging.qa_enabled:
+            write_query_log(
+                project_paths=self._project_paths,
+                retriever_name="pathrag",
+                payload={
+                    "question": question,
+                    "answer": answer,
+                    "active_documents_root": str(self._project_paths.documents_root)
+                    if self._project_paths
+                    else None,
+                    "conversation_history": conversation_history or [],
+                    "retrieval_metadata": {
+                        "response_type": settings.retrieval.response_type,
+                        "entity_top_k": settings.retrieval.entity_top_k,
+                        "relation_top_k": settings.retrieval.relation_top_k,
+                        "chunk_top_k": settings.retrieval.chunk_top_k,
+                        "global_window_count": len(global_windows),
+                        "local_window_count": len(local_windows),
+                    },
+                    "model": _retrieval_model_metadata(),
+                    "context_windows": [
+                        {"label": window.label, "text": window.text, "score": window.score}
+                        for window in context_windows
+                    ],
+                    "retrieved_entities": [
+                        {
+                            "name": match.name,
+                            "type": match.type,
+                            "description": match.description,
+                            "score": match.score,
+                        }
+                        for match in entity_matches
+                    ],
+                    "retrieved_relationships": [
+                        {
+                            "source_name": match.source_name,
+                            "target_name": match.target_name,
+                            "description": match.description,
+                            "keywords": match.keywords,
+                            "score": match.score,
+                        }
+                        for match in relation_matches
+                    ],
+                    "retrieved_chunks": [
+                        {
+                            "chunk_uuid": match.chunk_uuid,
+                            "document_id": match.document_id,
+                            "filename": match.filename,
+                            "text": match.text,
+                            "score": match.score,
+                        }
+                        for match in chunk_matches
+                    ],
+                },
+            )
+        return result
 
     def retrieve(
         self,

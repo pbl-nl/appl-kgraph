@@ -184,14 +184,14 @@ def chunk_parsed_pages(
         return chunks
 
     i = 0  # index of the next *new* sentence to place
-    prev_chunk_sentence_indices: List[int] = []
+    prev_new_sentence_indices: List[int] = []
 
     while i < len(sentences):
         # Determine overlap sentences (from tail of previous chunk) within overlap_chars
         overlap: List[Sentence] = []
-        if prev_chunk_sentence_indices and overlap_chars > 0:
+        if prev_new_sentence_indices and overlap_chars > 0:
             # Walk backwards over previous chunk's sentence indices, collect until we hit the char budget
-            tail = [sentences[k] for k in prev_chunk_sentence_indices]
+            tail = [sentences[k] for k in prev_new_sentence_indices]
             total = 0
             tmp: List[Sentence] = []
             for s in reversed(tail):
@@ -256,11 +256,12 @@ def chunk_parsed_pages(
             "included_new_sentence_count": len(new_sents),
             "include_overlap_in_limit": include_overlap_in_limit,
             "max_chars_target": max_chars,
+            "exceeds_target": len(text) > max_chars,
         }
         chunks.append(chunk)
 
         # Prepare for next iteration
-        prev_chunk_sentence_indices = chunk_sentence_indices
+        prev_new_sentence_indices = [s.idx for s in new_sents]
 
     return chunks
 

@@ -1,87 +1,92 @@
+from __future__ import annotations
+
+import argparse
 import asyncio
 from pathlib import Path
-from typing import Optional
-# local imports
+from typing import List, Optional, Tuple
+
 from ingestion import ingest_paths
+from lightrag import LightRAG, RetrievalResult
 from pathrag import PathRAG, render_full_context
-from fileparser import FileParser
-from lightrag import RetrievalResult
+from project_paths import list_document_paths, resolve_project_paths
 
 
-async def ask_with_pathrag(question: str, verbose: bool = False, conversation_history=None) -> None:
-    """
-    Asks a question using PathRAG retrieval and prints the answer with context.
-
-    Args:
-        question (str): The question to ask.
-        verbose (bool, optional): If True, displays full context details. Defaults to False.
-        conversation_history (optional): List of (role, text) tuples for conversation history.
-
-    Returns:
-        None
-    """
-    rag = PathRAG(
-        system_prompt=""
-    )
+async def ask_with_pathrag(
+    question: str,
+    *,
+    documents_root: Path,
+    verbose: bool = False,
+    conversation_history: Optional[List[Tuple[str, str]]] = None,
+) -> None:
+    project_paths = resolve_project_paths(documents_root)
+    rag = PathRAG(project_paths=project_paths, system_prompt="")
     result = await rag.aretrieve(question, conversation_history=conversation_history)
     print("Answer:\n", result.answer)
-
-    print(render_full_context(result) if verbose else "")
-    if not verbose:
+    if verbose:
+        print(render_full_context(result))
+    elif result.context_windows:
         for window in result.context_windows:
             print(f"\n[{window.label}] score={window.score:.2f}\n{window.text}")
 
 
-async def ask_with_lightrag(question: str, verbose: Optional[bool] = False, history: Optional[list] = None) -> RetrievalResult:
-    """
-    Asks a question using LightRAG retrieval and prints the answer with context.
-
-    Args:
-        question (str): The question to ask.
-        verbose (bool, optional): If True, displays full context details. Defaults to False.
-        history (list, optional): Conversation history. Defaults to None.
-
-    Returns:
-        Result object containing the answer and context.
-    """
-    from lightrag import LightRAG
-    from lightrag import render_full_context
-    rag = LightRAG(
-        system_prompt=""
-    )
+async def ask_with_lightrag(
+    question: str,
+    *,
+    documents_root: Path,
+    verbose: bool = False,
+    history: Optional[List[Tuple[str, str]]] = None,
+) -> RetrievalResult:
+    project_paths = resolve_project_paths(documents_root)
+    rag = LightRAG(project_paths=project_paths, system_prompt="")
     result = await rag.aretrieve(question, conversation_history=history)
     print("Answer:\n", result.answer)
+    if verbose:
+        from lightrag import render_full_context as render_lightrag_context
 
-    print(render_full_context(result) if verbose else "")
-    
+        print(render_lightrag_context(result))
     return result
 
 
-def main():
-    """
-    Main entry point for document ingestion and Q&A demonstration.
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Ingest a document folder and query the project-scoped RAG stores.")
+    parser.add_argument("documents_root", nargs="?", default="docs", help="Folder containing documents to ingest and query.")
+    args = parser.parse_args()
 
-    Ingests documents from the 'docs' directory and runs a sample PathRAG query.
-    """
-    root = Path('docs')
-    paths = FileParser(root).filepaths
+    documents_root = Path(args.documents_root).expanduser().resolve()
+    paths = list_document_paths(documents_root)
     if not paths:
         print("No files to ingest.")
         return
-    ingest_paths(paths)
-    # query = "Who are the authors of LayoutParser and do they overlap any of the other articles?"
+
+    ingest_paths(paths, documents_root=documents_root)
+
+    conversation_history: List[Tuple[str, str]] = []
     query = input("Enter your question: ")
-    conversation_history = []  # List[Tuple[str, str]] with role in {"user", "assistant"}
     while query not in ("exit", "quit"):
         print("\n--- PathRAG Response ---\n")
-        asyncio.run(ask_with_pathrag(query, verbose=True, conversation_history=conversation_history))
+        asyncio.run(
+            ask_with_pathrag(
+                query,
+                documents_root=documents_root,
+                verbose=True,
+                conversation_history=conversation_history,
+            )
+        )
         print("\n---\n")
         print("\n--- LightRAG Response ---\n")
-        result = asyncio.run(ask_with_lightrag(query, verbose=True, history=conversation_history))
+        result = asyncio.run(
+            ask_with_lightrag(
+                query,
+                documents_root=documents_root,
+                verbose=True,
+                history=conversation_history,
+            )
+        )
         conversation_history.append(("user", query))
         conversation_history.append(("assistant", result.answer))
         print("\n---\n")
         query = input("Enter your next question: ")
+
 
 if __name__ == "__main__":
     main()

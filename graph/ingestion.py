@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 import json
 import mimetypes
 import uuid
@@ -193,6 +194,30 @@ def _write_extraction_audits(
     ensure_project_dirs(project_paths)
     target = project_paths.extraction_audits_dir / f"{Path(filename).stem}.audit.json"
     target.write_text(json.dumps(audits, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_raw_text_audit(
+    project_paths: Optional[ProjectPaths],
+    *,
+    filename: str,
+    doc_meta: Dict[str, Any],
+    raw_text: str,
+) -> None:
+    if project_paths is None:
+        return
+    ensure_project_dirs(project_paths)
+    payload = {
+        "filename": filename,
+        "filepath": doc_meta.get("filepath"),
+        "doc_id": doc_meta.get("doc_id"),
+        "content_hash": doc_meta.get("content_hash"),
+        "language": doc_meta.get("language", "unknown"),
+        "char_count": len(raw_text),
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+        "raw_text": raw_text,
+    }
+    target = project_paths.extraction_audits_dir / f"{Path(filename).stem}.raw.json"
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _write_retrieval_graph_snapshot(
@@ -836,6 +861,13 @@ def ingest_paths(
             "content_hash": content_hash,                
             "full_char_count": len(full_text),
         }
+
+        _write_raw_text_audit(
+            project_paths=active_project_paths,
+            filename=p.name,
+            doc_meta=doc_meta,
+            raw_text=full_text,
+        )
 
         report(f"{step_prefix} - storing document")
         storage.add_document(doc_meta, full_text)  # from storage.py

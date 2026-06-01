@@ -52,6 +52,7 @@ humanfriendly==10.0
 idna==3.11
 importlib_metadata==8.7.0
 importlib_resources==6.5.2
+iniconfig==2.3.0
 ipython==9.7.0
 ipython_pygments_lexers==1.1.1
 jedi==0.19.2
@@ -98,6 +99,7 @@ pandas==2.3.3
 parso==0.8.5
 pillow==11.3.0
 pip==25.2
+pluggy==1.6.0
 posthog==5.4.0
 prompt_toolkit==3.0.52
 propcache==0.4.1
@@ -116,6 +118,7 @@ pyparsing==3.2.5
 PyPika==0.48.9
 pyproject_hooks==1.2.0
 pyreadline3==3.5.4
+pytest==9.0.3
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 python-multipart==0.0.20

@@ -12,6 +12,14 @@
 - Avoid broad refactors unless they directly support the task at hand.
 - Preserve the modular design so retrieval strategies, indexing, prompts, and storage can remain independently inspectable and extensible.
 
+## Testing Expectations
+
+- Every new functionality should include standalone tests that prove the behavior works independently of the UI or a full end-to-end run.
+- Refactors should include targeted regression tests, or update existing tests, to show that intended behavior stayed the same.
+- Prefer small, focused tests close to the changed module over broad tests that are hard to diagnose.
+- Cover edge cases that are likely to affect real project data, such as empty inputs, duplicate names, skipped files, existing storage, and path handling.
+- Run the relevant test subset before committing, and run the broader suite when touching shared ingestion, storage, retrieval, or settings behavior.
+
 ## Commit Style
 
 Use Conventional Commits:

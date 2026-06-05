@@ -297,6 +297,7 @@ def extract_from_chunks(
     storage: Optional[Storage] = None,
     audit_enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
+    '''Extract entities and relationships from the provided chunks using LLM prompts, with optional caching and auditing.'''
     chat = client or Chat.singleton()
     active_storage = _ensure_storage(storage)
     chunk_list = list(chunks)

@@ -4,6 +4,7 @@ import types
 import json
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
@@ -24,7 +25,13 @@ sys.modules.setdefault("langdetect", langdetect_stub)
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 
-from ingestion import _resolve_type, _write_raw_text_audit, dedupe_entities_for_vectors
+import ingestion
+from ingestion import (
+    _resolve_type,
+    _write_extraction_diagnostics,
+    _write_raw_document_snapshot,
+    dedupe_entities_for_vectors,
+)
 from project_paths import resolve_project_paths
 
 
@@ -62,7 +69,7 @@ def test_dedupe_entities_prefers_typed_over_unknown():
     assert names_to_types["Bob"] == "Company"
 
 
-def test_write_raw_text_audit_writes_json_payload(tmp_path):
+def test_write_raw_document_snapshot_writes_canonical_storage_payload(tmp_path):
     documents_root = tmp_path / "docs"
     documents_root.mkdir()
     project_paths = resolve_project_paths(documents_root)
@@ -74,14 +81,14 @@ def test_write_raw_text_audit_writes_json_payload(tmp_path):
         "language": "en",
     }
 
-    _write_raw_text_audit(
+    _write_raw_document_snapshot(
         project_paths,
         filename="example.txt",
         doc_meta=doc_meta,
         raw_text="",
     )
 
-    target = project_paths.extraction_audits_dir / "example.raw.json"
+    target = project_paths.raw_documents_dir / "example.txt.raw.json"
     assert target.exists()
 
     payload = json.loads(target.read_text(encoding="utf-8"))
@@ -93,3 +100,29 @@ def test_write_raw_text_audit_writes_json_payload(tmp_path):
     assert payload["char_count"] == 0
     assert payload["raw_text"] == ""
     assert payload["extracted_at"].endswith("+00:00")
+def test_extraction_diagnostics_respect_internal_logging_gate(tmp_path, monkeypatch):
+    documents_root = tmp_path / "docs"
+    documents_root.mkdir()
+    project_paths = resolve_project_paths(documents_root)
+    validation_results = [{"chunk_uuid": "chunk-1", "summary": "missing nothing"}]
+
+    monkeypatch.setattr(
+        ingestion,
+        "settings",
+        SimpleNamespace(logging=SimpleNamespace(internal_logging_enabled=False)),
+    )
+
+    _write_extraction_diagnostics(project_paths, "report.md", validation_results)
+
+    assert not any(project_paths.extraction_diagnostics_dir.glob("*.validation.json"))
+
+    monkeypatch.setattr(
+        ingestion,
+        "settings",
+        SimpleNamespace(logging=SimpleNamespace(internal_logging_enabled=True)),
+    )
+
+    _write_extraction_diagnostics(project_paths, "report.md", validation_results)
+
+    target = project_paths.extraction_diagnostics_dir / "report.validation.json"
+    assert target.exists()

@@ -211,9 +211,9 @@ It appears some entities may have still been missed.
 Answer ONLY by `YES` OR `NO` if there are still entities that need to be added.
 """.strip()
 
-PROMPTS["entity_extraction_audit"] = """---Role---
+PROMPTS["entity_extraction_validation"] = """---Role---
 
-You are auditing an information extraction result for completeness.
+You are validating an information extraction result for completeness.
 
 ---Goal---
 
@@ -250,11 +250,13 @@ Use {language} for any natural-language explanations.
       "reason": "why this relationship looks missing"
     }}
   ],
-  "summary": "short audit summary"
+  "summary": "short validation summary"
 }}
 
 JSON:
 """
+
+PROMPTS["entity_extraction_audit"] = PROMPTS["entity_extraction_validation"]
 
 PROMPTS["fail_response"] = (
     "Sorry, I'm not able to provide an answer to that question.[no-context]"

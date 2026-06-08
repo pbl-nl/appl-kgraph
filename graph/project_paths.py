@@ -12,10 +12,15 @@ class ProjectPaths:
     documents_root: Path
     project_root: Path
     storage_root: Path
+    raw_documents_dir: Path
     knowledge_graph_dir: Path
     graph_pickle_file: Path
     retrieval_graph_pickle_file: Path
     logs_dir: Path
+    audit_logs_dir: Path
+    diagnostics_dir: Path
+    extraction_diagnostics_dir: Path
+    # Deprecated aliases kept for one transition period.
     qa_logs_dir: Path
     audits_dir: Path
     extraction_audits_dir: Path
@@ -29,11 +34,14 @@ def resolve_project_paths(documents_root: Union[Path, str]) -> ProjectPaths:
     root = Path(documents_root).expanduser().resolve()
     project_root = root / settings.project.artifacts_dirname
     storage_root = project_root / settings.project.storage_dirname
+    raw_documents_dir = storage_root / settings.project.raw_documents_dirname
     knowledge_graph_dir = project_root / "knowledge_graph"
     logs_dir = project_root / settings.project.logs_dirname
-    qa_logs_dir = logs_dir / settings.project.qa_logs_dirname
-    audits_dir = project_root / settings.project.audits_dirname
-    extraction_audits_dir = audits_dir / settings.project.extraction_audits_dirname
+    audit_logs_dir = logs_dir / settings.project.audit_logs_dirname
+    diagnostics_dir = project_root / settings.project.diagnostics_dirname
+    extraction_diagnostics_dir = (
+        diagnostics_dir / settings.project.extraction_diagnostics_dirname
+    )
 
     storage = StoragePaths(
         documents_db=str(storage_root / "documents.sqlite"),
@@ -48,13 +56,17 @@ def resolve_project_paths(documents_root: Union[Path, str]) -> ProjectPaths:
         documents_root=root,
         project_root=project_root,
         storage_root=storage_root,
+        raw_documents_dir=raw_documents_dir,
         knowledge_graph_dir=knowledge_graph_dir,
         graph_pickle_file=knowledge_graph_dir / "kg.pkl",
         retrieval_graph_pickle_file=knowledge_graph_dir / "kg_retrieval.pkl",
         logs_dir=logs_dir,
-        qa_logs_dir=qa_logs_dir,
-        audits_dir=audits_dir,
-        extraction_audits_dir=extraction_audits_dir,
+        audit_logs_dir=audit_logs_dir,
+        diagnostics_dir=diagnostics_dir,
+        extraction_diagnostics_dir=extraction_diagnostics_dir,
+        qa_logs_dir=audit_logs_dir,
+        audits_dir=diagnostics_dir,
+        extraction_audits_dir=extraction_diagnostics_dir,
         storage=storage,
         ingestion_log_file=logs_dir / "ingestion.log",
         pathrag_log_file=logs_dir / "pathrag.log",
@@ -66,11 +78,12 @@ def ensure_project_dirs(project_paths: ProjectPaths) -> None:
     for path in (
         project_paths.project_root,
         project_paths.storage_root,
+        project_paths.raw_documents_dir,
         project_paths.knowledge_graph_dir,
         project_paths.logs_dir,
-        project_paths.qa_logs_dir,
-        project_paths.audits_dir,
-        project_paths.extraction_audits_dir,
+        project_paths.audit_logs_dir,
+        project_paths.diagnostics_dir,
+        project_paths.extraction_diagnostics_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)
 

@@ -19,7 +19,7 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def write_query_log(
+def write_audit_log(
     *,
     project_paths: Optional[ProjectPaths],
     retriever_name: str,
@@ -31,7 +31,7 @@ def write_query_log(
     ensure_project_dirs(project_paths)
     timestamp = datetime.now(timezone.utc)
     filename = f"{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}_{retriever_name}_{uuid4().hex[:8]}.json"
-    target = project_paths.qa_logs_dir / filename
+    target = project_paths.audit_logs_dir / filename
 
     body = {
         "retriever": retriever_name,
@@ -40,3 +40,16 @@ def write_query_log(
     }
     target.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
     return target
+
+
+def write_query_log(
+    *,
+    project_paths: Optional[ProjectPaths],
+    retriever_name: str,
+    payload: Dict[str, Any],
+) -> Optional[Path]:
+    return write_audit_log(
+        project_paths=project_paths,
+        retriever_name=retriever_name,
+        payload=payload,
+    )

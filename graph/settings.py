@@ -96,6 +96,7 @@ class ExtractionSettings:
     use_chunk_language: bool = True
     detect_chunk_language: bool = False
     audit_second_pass_enabled: bool = False
+    raw_text_extraction_audit_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,7 @@ def load_settings() -> Settings:
             "EXTRACTION_AUDIT_SECOND_PASS_ENABLED",
             False,
         ),
+        raw_text_extraction_audit_enabled=ut.env_bool("RAW_TEXT_EXTRACTION_AUDIT_ENABLED", False),
     )
 
     logging_settings = LoggingSettings(

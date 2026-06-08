@@ -862,12 +862,13 @@ def ingest_paths(
             "full_char_count": len(full_text),
         }
 
-        _write_raw_text_audit(
-            project_paths=active_project_paths,
-            filename=p.name,
-            doc_meta=doc_meta,
-            raw_text=full_text,
-        )
+        if settings.extraction.raw_text_extraction_audit_enabled:
+            _write_raw_text_audit(
+                project_paths=active_project_paths,
+                filename=p.name,
+                doc_meta=doc_meta,
+                raw_text=full_text,
+            )
 
         report(f"{step_prefix} - storing document")
         storage.add_document(doc_meta, full_text)  # from storage.py

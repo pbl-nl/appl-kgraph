@@ -298,7 +298,9 @@ def test_delete_chunks_nodes_edges_vectors(fresh_storage: Storage):
     post = st.get_edges([(EDGES[1]["source_name"], EDGES[1]["target_name"]), (EDGES[2]["source_name"], EDGES[2]["target_name"])])
     assert not post and pre
 
-    # vectors
+    # vectors (ChromaDB mutations are disabled on some platforms, e.g. Windows + Python 3.12+)
+    if st._vector_mutations_disabled:
+        return
     try:
         st.add_chunk_vectors(chs[:3])
         pre = st.get_chunk_vector(chs[0]["chunk_uuid"])

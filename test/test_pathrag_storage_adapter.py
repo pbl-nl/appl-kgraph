@@ -14,22 +14,49 @@ sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 from graph.pathrag import StorageAdapter
 
 
-class _FakeVector:
-    def __init__(self, response):
-        self._response = response
-
-    def query(self, *args, **kwargs):
-        return self._response
-
-
 class _FakeStorage:
     def __init__(self, responses):
-        self.entity_vectors = _FakeVector(responses["entities"])
-        self.relation_vectors = _FakeVector(responses["relations"])
-        self.chunk_vectors = _FakeVector(responses["chunks"])
+        self._responses = responses
 
     def init(self):
         return None
+
+    def search_entities(self, text: str, n_results: int = 5):
+        results = []
+        for row in self._responses["entities"]:
+            metadatas = row.get("metadatas", [])
+            distances = row.get("distances", [])
+            for i, meta in enumerate(metadatas):
+                dist = distances[i] if i < len(distances) else 1.0
+                results.append({**meta, "score": max(0.0, 1.0 - float(dist))})
+        return results[:n_results]
+
+    def search_relations(self, text: str, n_results: int = 5):
+        results = []
+        for row in self._responses["relations"]:
+            metadatas = row.get("metadatas", [])
+            distances = row.get("distances", [])
+            for i, meta in enumerate(metadatas):
+                dist = distances[i] if i < len(distances) else 1.0
+                results.append({**meta, "score": max(0.0, 1.0 - float(dist))})
+        return results[:n_results]
+
+    def search_chunks(self, text: str, n_results: int = 5):
+        results = []
+        for row in self._responses["chunks"]:
+            ids = row.get("ids", [])
+            metadatas = row.get("metadatas", [])
+            documents = row.get("documents", [])
+            distances = row.get("distances", [])
+            for i, meta in enumerate(metadatas):
+                dist = distances[i] if i < len(distances) else 1.0
+                results.append({
+                    "chunk_uuid": ids[i] if i < len(ids) else "",
+                    **meta,
+                    "text": documents[i] if i < len(documents) else "",
+                    "score": max(0.0, 1.0 - float(dist)),
+                })
+        return results[:n_results]
 
 
 @pytest.fixture

@@ -434,71 +434,9 @@ class StorageAdapter:
     # ------------------------------------------------------------------
     # Vector queries
     # ------------------------------------------------------------------
-    @staticmethod
-    def _as_list(value: Any) -> List[Any]:
-        if value is None:
-            return []
-        if isinstance(value, dict):
-            return [value]
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            return list(value)
-        return [value]
-
-    @staticmethod
-    def _distance_to_score(distance: Any) -> float:
-        try:
-            value = float(distance)
-        except (TypeError, ValueError):
-            return 0.0
-        return 1.0 / (1.0 + max(value, 0.0))
-
-    @classmethod
-    def _legacy_vector_query(
-        cls,
-        vector_index: Any,
-        text: str,
-        limit: int,
-    ) -> List[Dict[str, Any]]:
-        if vector_index is None or not hasattr(vector_index, "query"):
-            return []
-
-        response = vector_index.query(query_texts=[text], n_results=limit)
-        rows = cls._as_list(response)
-        matches: List[Dict[str, Any]] = []
-
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            ids = cls._as_list(row.get("ids"))
-            metadatas = cls._as_list(row.get("metadatas"))
-            documents = cls._as_list(row.get("documents"))
-            distances = cls._as_list(row.get("distances"))
-
-            for index, metadata in enumerate(metadatas):
-                if not isinstance(metadata, dict):
-                    continue
-                item = dict(metadata)
-                if index < len(ids):
-                    item.setdefault("id", ids[index])
-                    item.setdefault("chunk_uuid", ids[index])
-                if index < len(documents):
-                    item.setdefault("text", documents[index])
-                if index < len(distances):
-                    item.setdefault("score", cls._distance_to_score(distances[index]))
-                matches.append(item)
-
-        return matches
-
     def query_entities(self, text: str, limit: int = 5) -> List[EntityMatch]:
         """Query entity vector index and return EntityMatch objects."""
-        if hasattr(self._storage, "search_entities"):
-            results = self._storage.search_entities(text=text, n_results=limit) or []
-        else:
-            results = self._legacy_vector_query(
-                getattr(self._storage, "entity_vectors", None),
-                text,
-                limit,
-            )
+        results = self._storage.search_entities(text=text, n_results=limit) or []
         matches: List[EntityMatch] = []
         if not results:
             return matches
@@ -518,14 +456,7 @@ class StorageAdapter:
 
     def query_relations(self, text: str, limit: int = 5) -> List[RelationMatch]:
         """Query relation vector index and return RelationMatch objects."""
-        if hasattr(self._storage, "search_relations"):
-            results = self._storage.search_relations(text=text, n_results=limit) or []
-        else:
-            results = self._legacy_vector_query(
-                getattr(self._storage, "relation_vectors", None),
-                text,
-                limit,
-            )
+        results = self._storage.search_relations(text=text, n_results=limit) or []
         matches: List[RelationMatch] = []
         if not results:
             return matches
@@ -546,14 +477,7 @@ class StorageAdapter:
 
 
     def query_chunks(self, text: str, limit: int = 5) -> List[ChunkMatch]:
-        if hasattr(self._storage, "search_chunks"):
-            results = self._storage.search_chunks(text=text, n_results=limit) or []
-        else:
-            results = self._legacy_vector_query(
-                getattr(self._storage, "chunk_vectors", None),
-                text,
-                limit,
-            )
+        results = self._storage.search_chunks(text=text, n_results=limit) or []
         matches: List[ChunkMatch] = []
         for metadata in results:
             if not isinstance(metadata, dict):

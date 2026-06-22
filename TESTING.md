@@ -4,26 +4,23 @@ Run tests from the repository root with the project virtual environment.
 
 ## Complete Baseline
 
-The current modules use a mix of package imports and top-level imports from
-`graph/`. Until those imports are normalized, add both the repository root and
-`graph/` to `PYTHONPATH` when running the complete suite in PowerShell:
+Run both the unit and storage integration suites:
 
 ```powershell
-$env:PYTHONPATH = "$(Get-Location)\graph;$(Get-Location)"
-.\.venv\Scripts\python.exe -m pytest -q test
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Baseline on June 22, 2026: 37 tests passed.
+
+## Unit Tests
+
+Exclude tests that exercise the storage integrations:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q -m "not storage_integration"
 ```
 
 Baseline on June 22, 2026: 29 tests passed.
-
-## Non-Storage Tests
-
-The tests that do not require Chroma run in normal package mode:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q test --ignore=test/test_storage_full.py
-```
-
-Baseline on June 22, 2026: 21 tests passed.
 
 ## Storage Integration Tests
 
@@ -33,13 +30,15 @@ test's temporary directory; no external Chroma service or embedding API is
 required.
 
 ```powershell
-$env:PYTHONPATH = "$(Get-Location)\graph;$(Get-Location)"
-.\.venv\Scripts\python.exe -m pytest -q test/test_storage_full.py
+.\.venv\Scripts\python.exe -m pytest -q -m storage_integration
 ```
 
 Baseline on June 22, 2026: 8 tests passed.
 
-Running the storage tests without `graph/` on `PYTHONPATH` currently fails
-during collection because `graph/db_storage.py` imports `llm` as a top-level
-module. This is a known package-mode constraint, not a storage service
-requirement.
+Development and CI use the same embedded Chroma arrangement. CI must install
+`requirements.txt`, including `chromadb`, but does not need a Chroma service
+container or external embedding credentials.
+
+`pytest.ini` adds both the repository root and `graph/` to the test import path
+because production modules currently mix package and top-level imports. This
+keeps test collection deterministic until those imports are normalized.

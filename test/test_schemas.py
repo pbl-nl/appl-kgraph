@@ -4,6 +4,8 @@ from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 
+import pytest
+
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
@@ -39,7 +41,12 @@ from pathrag import ChunkMatch, EntityMatch, RelationMatch
 
 def test_pipeline_schema_objects_form_standalone_boundaries(tmp_path):
     doc_ref = DocumentRef(path=tmp_path / "report.md", root=tmp_path)
-    raw = RawDocument(ref=doc_ref, pages=[(0, "Alpha")], text="Alpha")
+    raw = RawDocument(
+        ref=doc_ref,
+        doc_id="doc-1",
+        pages=[(0, "Alpha")],
+        text="Alpha",
+    )
     enriched = EnrichedDocument(raw=raw, text="Alpha", metadata={"language": "en"})
     chunk = Chunk(
         chunk_uuid="chunk-1",
@@ -61,6 +68,7 @@ def test_pipeline_schema_objects_form_standalone_boundaries(tmp_path):
     assert answer.context.entities[0].name == "Alpha"
     assert answer.context.chunks[0].chunk_uuid == "chunk-1"
     assert enriched.raw.ref.path == tmp_path / "report.md"
+    assert enriched.raw.doc_id == answer.context.chunks[0].doc_id
 
 
 def test_schema_defaults_are_not_shared():
@@ -264,6 +272,71 @@ def test_chunk_contract_accepts_current_ingestion_payload():
     assert chunks[0].end_page == 0
     assert chunks[0].filepath == "/documents/report.md"
     assert chunks[0].document_language == "en"
+
+
+def test_empty_raw_document_preserves_stable_identity():
+    raw = RawDocument(
+        ref=DocumentRef(path=Path("empty.txt")),
+        doc_id="doc-empty",
+        pages=[],
+        text="",
+    )
+
+    assert raw.doc_id == "doc-empty"
+    assert raw.pages == ()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"doc_id": ""}, "doc_id must not be empty"),
+        ({"pages": [(1, "Alpha")]}, "zero-based and contiguous"),
+        ({"pages": [(0, "Alpha"), (2, "Beta")]}, "zero-based and contiguous"),
+        ({"text": "Different"}, "newline-joined page text"),
+    ],
+)
+def test_raw_document_rejects_invalid_identity_and_pages(overrides, message):
+    values = {
+        "ref": DocumentRef(path=Path("report.md")),
+        "doc_id": "doc-1",
+        "pages": [(0, "Alpha")],
+        "text": "Alpha",
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        RawDocument(**values)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"chunk_uuid": ""}, "chunk_uuid must not be empty"),
+        ({"doc_id": ""}, "doc_id must not be empty"),
+        ({"chunk_id": -1}, "chunk_id must be zero or greater"),
+        ({"char_count": 4}, "char_count must equal"),
+        ({"start_page": -1}, "start_page must be zero or greater"),
+        ({"start_page": 2, "end_page": 1}, "end_page must be greater"),
+    ],
+)
+def test_chunk_rejects_invalid_identity_range_and_character_count(
+    overrides,
+    message,
+):
+    values = {
+        "chunk_uuid": "chunk-1",
+        "doc_id": "doc-1",
+        "chunk_id": 0,
+        "filename": "report.md",
+        "text": "Alpha",
+        "char_count": 5,
+        "start_page": 0,
+        "end_page": 0,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        Chunk(**values)
 
 
 def test_graph_contracts_accept_current_extractor_payloads():

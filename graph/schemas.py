@@ -6,6 +6,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
+def _require_identifier(value: Any, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+
+
+def _require_non_negative_integer(value: Any, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field_name} must be zero or greater")
+
+
 @dataclass(frozen=True)
 class DocumentRef:
     path: Path
@@ -15,10 +29,43 @@ class DocumentRef:
 
 @dataclass(frozen=True)
 class RawDocument:
+    """Parsed source with one stable ID and zero-based contiguous pages."""
+
     ref: DocumentRef
-    pages: Sequence[Tuple[int, str]]
+    doc_id: str
+    pages: Tuple[Tuple[int, str], ...]
     text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.doc_id, "doc_id")
+        if isinstance(self.pages, (str, bytes)) or not isinstance(
+            self.pages,
+            Sequence,
+        ):
+            raise TypeError("pages must be a sequence of (page_number, text) pairs")
+
+        normalized_pages = []
+        for expected_number, page in enumerate(self.pages):
+            if (
+                isinstance(page, (str, bytes))
+                or not isinstance(page, Sequence)
+                or len(page) != 2
+            ):
+                raise TypeError("each page must be a (page_number, text) pair")
+            page_number, page_text = page
+            _require_non_negative_integer(page_number, "page number")
+            if page_number != expected_number:
+                raise ValueError("page numbers must be zero-based and contiguous")
+            if not isinstance(page_text, str):
+                raise TypeError("page text must be a string")
+            normalized_pages.append((page_number, page_text))
+
+        if not isinstance(self.text, str):
+            raise TypeError("document text must be a string")
+        if self.text != "\n".join(text for _, text in normalized_pages):
+            raise ValueError("document text must equal the newline-joined page text")
+        object.__setattr__(self, "pages", tuple(normalized_pages))
 
 
 @dataclass(frozen=True)
@@ -30,6 +77,8 @@ class EnrichedDocument:
 
 @dataclass(frozen=True)
 class Chunk:
+    """Stored chunk with stable IDs and an inclusive zero-based page range."""
+
     chunk_uuid: str
     doc_id: str
     chunk_id: int
@@ -41,6 +90,20 @@ class Chunk:
     filepath: Optional[str] = None
     document_language: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.chunk_uuid, "chunk_uuid")
+        _require_identifier(self.doc_id, "doc_id")
+        _require_non_negative_integer(self.chunk_id, "chunk_id")
+        _require_non_negative_integer(self.char_count, "char_count")
+        _require_non_negative_integer(self.start_page, "start_page")
+        _require_non_negative_integer(self.end_page, "end_page")
+        if self.end_page < self.start_page:
+            raise ValueError("end_page must be greater than or equal to start_page")
+        if not isinstance(self.text, str):
+            raise TypeError("chunk text must be a string")
+        if self.char_count != len(self.text):
+            raise ValueError("char_count must equal the length of chunk text")
 
 
 @dataclass(frozen=True)

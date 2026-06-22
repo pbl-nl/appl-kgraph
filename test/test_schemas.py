@@ -15,6 +15,7 @@ from schemas import (
     DocumentRef,
     EnrichedDocument,
     Entity,
+    ExtractionResult,
     GraphDelta,
     QueryPlan,
     RawDocument,
@@ -54,10 +55,18 @@ def test_pipeline_schema_objects_form_standalone_boundaries(tmp_path):
 def test_schema_defaults_are_not_shared():
     first = GraphDelta()
     second = GraphDelta()
+    first_extraction = ExtractionResult()
+    second_extraction = ExtractionResult()
 
     first.entities.append(Entity(name="Alpha", type="category", description="A"))
+    first_extraction.content_keywords.append("alpha")
+    first_extraction.chunk_results.append({"chunk_uuid": "chunk-1"})
+    first_extraction.diagnostics.append({"summary": "complete"})
 
     assert second.entities == []
+    assert second_extraction.content_keywords == []
+    assert second_extraction.chunk_results == []
+    assert second_extraction.diagnostics == []
 
 
 def test_chunk_contract_accepts_current_ingestion_payload():
@@ -93,15 +102,22 @@ def test_graph_contracts_accept_current_extractor_payloads():
 
     entities = [Entity(**payload) for payload in parsed.entities]
     relations = [Relation(**payload) for payload in parsed.relationships]
+    result = ExtractionResult(
+        entities=entities,
+        relations=relations,
+        content_keywords=["partnership"],
+        chunk_results=[{"chunk_uuid": "chunk-1", "raw_output": "raw"}],
+        diagnostics=[{"chunk_uuid": "chunk-1", "summary": "complete"}],
+    )
 
-    assert entities == [
+    assert result.entities == [
         Entity(
             name="Alpha",
             type="Organization",
             description="Primary entity",
         )
     ]
-    assert relations == [
+    assert result.relations == [
         Relation(
             source_name="Alpha",
             target_name="Beta",
@@ -110,3 +126,6 @@ def test_graph_contracts_accept_current_extractor_payloads():
             weight=0.75,
         )
     ]
+    assert result.content_keywords == ["partnership"]
+    assert result.chunk_results[0]["raw_output"] == "raw"
+    assert result.diagnostics[0]["summary"] == "complete"

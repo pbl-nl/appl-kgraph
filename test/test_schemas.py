@@ -1,5 +1,6 @@
 import os
 import sys
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from schemas import (
     RelationCandidate,
     RetrievalCandidates,
     RetrievedContext,
+    extraction_result_from_legacy,
+    extraction_result_to_legacy,
 )
 from extractor import parse_model_output
 from ingestion import build_chunks
@@ -197,3 +200,80 @@ def test_graph_contracts_accept_current_extractor_payloads():
     assert result.content_keywords == ["partnership"]
     assert result.chunk_results[0]["raw_output"] == "raw"
     assert result.diagnostics[0]["summary"] == "complete"
+
+
+def test_extraction_result_legacy_payload_round_trip():
+    legacy = {
+        "entities": [
+            {
+                "name": "Alpha",
+                "type": "Organization",
+                "description": "Primary entity",
+                "source_id": "chunk-1",
+                "filepath": "/documents/report.md",
+                "confidence": 0.95,
+            }
+        ],
+        "relationships": [
+            {
+                "source_name": "Alpha",
+                "target_name": "Beta",
+                "description": "Works with",
+                "keywords": "collaboration",
+                "weight": 0.75,
+                "source_id": "chunk-1",
+                "filepath": "/documents/report.md",
+                "provenance": "model",
+            }
+        ],
+        "content_keywords": ["partnership"],
+        "chunk_results": [
+            {
+                "chunk_uuid": "chunk-1",
+                "entities": [{"name": "Alpha"}],
+                "raw_output": "raw extraction",
+            }
+        ],
+        "validation_results": [
+            {"chunk_uuid": "chunk-1", "summary": "complete"}
+        ],
+        "audits": [{"chunk_uuid": "chunk-1", "summary": "complete"}],
+        "request_id": "request-1",
+    }
+    expected = deepcopy(legacy)
+
+    result = extraction_result_from_legacy(legacy)
+
+    assert result.entities[0].metadata == {"confidence": 0.95}
+    assert result.relations[0].metadata == {"provenance": "model"}
+    assert result.metadata == {"request_id": "request-1"}
+    assert extraction_result_to_legacy(result) == expected
+
+    legacy["entities"][0]["name"] = "Changed"
+    legacy["chunk_results"][0]["entities"][0]["name"] = "Changed"
+    assert result.entities[0].name == "Alpha"
+    assert result.chunk_results[0]["entities"][0]["name"] == "Alpha"
+
+
+def test_extraction_result_legacy_conversion_accepts_aliases_and_empty_payloads():
+    empty = extraction_result_from_legacy({})
+    aliased = extraction_result_from_legacy(
+        {
+            "relations": [
+                {
+                    "source_name": "Alpha",
+                    "target_name": "Beta",
+                    "description": "Related",
+                }
+            ],
+            "audits": [{"summary": "legacy diagnostic"}],
+        }
+    )
+
+    assert empty == ExtractionResult()
+    assert aliased.relations[0].source_name == "Alpha"
+    assert aliased.diagnostics == [{"summary": "legacy diagnostic"}]
+    legacy = extraction_result_to_legacy(aliased)
+    assert legacy["relationships"][0]["target_name"] == "Beta"
+    assert legacy["validation_results"] == [{"summary": "legacy diagnostic"}]
+    assert legacy["audits"] == [{"summary": "legacy diagnostic"}]

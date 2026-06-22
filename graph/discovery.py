@@ -7,6 +7,15 @@ from schemas import DocumentRef
 from settings import VALID_EXTENSIONS, settings
 
 
+def is_temporary_document(path: Path) -> bool:
+    """Return whether a path matches the ingestion temporary-file policy."""
+
+    name = path.name.lower()
+    return (
+        name.startswith("~$") and name.endswith((".docx", ".doc"))
+    ) or (name.endswith((".tmp", ".temp")) and "word" in name)
+
+
 def discover_documents(
     project_root: Path,
     *,
@@ -18,7 +27,8 @@ def discover_documents(
     if not root.exists() or not root.is_dir():
         return []
 
-    allowed = {extension.lower() for extension in (valid_extensions or VALID_EXTENSIONS)}
+    extensions = VALID_EXTENSIONS if valid_extensions is None else valid_extensions
+    allowed = {extension.lower() for extension in extensions}
     artifacts_root = root / settings.project.artifacts_dirname
     paths = []
 
@@ -26,6 +36,8 @@ def discover_documents(
         if not path.is_file():
             continue
         if artifacts_root in path.parents:
+            continue
+        if is_temporary_document(path):
             continue
         if path.suffix.lower() not in allowed:
             continue

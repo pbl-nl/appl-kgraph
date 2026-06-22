@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -179,6 +179,39 @@ _EXTRACTION_LEGACY_FIELDS = {
     "audits",
     "metadata",
 }
+_ENTITY_CANDIDATE_LEGACY_FIELDS = {
+    "name",
+    "type",
+    "description",
+    "score",
+    "metadata",
+}
+_RELATION_CANDIDATE_LEGACY_FIELDS = {
+    "source_name",
+    "target_name",
+    "description",
+    "keywords",
+    "score",
+    "metadata",
+}
+_CHUNK_CANDIDATE_LEGACY_FIELDS = {
+    "chunk_uuid",
+    "document_id",
+    "doc_id",
+    "filename",
+    "text",
+    "score",
+    "metadata",
+}
+_RETRIEVAL_CANDIDATE_LEGACY_FIELDS = {
+    "entities",
+    "entity_matches",
+    "relations",
+    "relation_matches",
+    "chunks",
+    "chunk_matches",
+    "metadata",
+}
 
 
 def _legacy_metadata(
@@ -324,6 +357,153 @@ def extraction_result_to_legacy(result: ExtractionResult) -> Dict[str, Any]:
             "chunk_results": deepcopy(result.chunk_results),
             "validation_results": diagnostics,
             "audits": deepcopy(diagnostics),
+        }
+    )
+    return payload
+
+
+def _candidate_mapping(payload: Any, candidate_type: str) -> Mapping[str, Any]:
+    if is_dataclass(payload) and not isinstance(payload, type):
+        return asdict(payload)
+    if isinstance(payload, Mapping):
+        return payload
+    raise TypeError(f"legacy {candidate_type} candidate must be a mapping or dataclass")
+
+
+def _entity_candidate_from_legacy(payload: Any) -> EntityCandidate:
+    candidate = _candidate_mapping(payload, "entity")
+    return EntityCandidate(
+        name=candidate.get("name", ""),
+        type=candidate.get("type"),
+        description=candidate.get("description", "") or "",
+        score=float(candidate.get("score", 0.0) or 0.0),
+        metadata=_legacy_metadata(candidate, _ENTITY_CANDIDATE_LEGACY_FIELDS),
+    )
+
+
+def _relation_candidate_from_legacy(payload: Any) -> RelationCandidate:
+    candidate = _candidate_mapping(payload, "relation")
+    return RelationCandidate(
+        source_name=candidate.get("source_name", ""),
+        target_name=candidate.get("target_name", ""),
+        description=candidate.get("description", "") or "",
+        keywords=candidate.get("keywords", "") or "",
+        score=float(candidate.get("score", 0.0) or 0.0),
+        metadata=_legacy_metadata(candidate, _RELATION_CANDIDATE_LEGACY_FIELDS),
+    )
+
+
+def _chunk_candidate_from_legacy(payload: Any) -> ChunkCandidate:
+    candidate = _candidate_mapping(payload, "chunk")
+    document_id = candidate.get("document_id")
+    if document_id is None:
+        document_id = candidate.get("doc_id", "")
+    return ChunkCandidate(
+        chunk_uuid=candidate.get("chunk_uuid", ""),
+        document_id=document_id,
+        filename=candidate.get("filename", "") or "",
+        text=candidate.get("text", "") or "",
+        score=float(candidate.get("score", 0.0) or 0.0),
+        metadata=_legacy_metadata(candidate, _CHUNK_CANDIDATE_LEGACY_FIELDS),
+    )
+
+
+def retrieval_candidates_from_legacy(
+    query_plan: QueryPlan,
+    payload: Mapping[str, Any],
+) -> RetrievalCandidates:
+    """Convert PathRAG or LightRAG candidate payloads to shared contracts."""
+
+    if not isinstance(payload, Mapping):
+        raise TypeError("legacy retrieval candidates must be a mapping")
+    entities = payload.get("entity_matches")
+    if entities is None:
+        entities = payload.get("entities")
+    relations = payload.get("relation_matches")
+    if relations is None:
+        relations = payload.get("relations")
+    chunks = payload.get("chunk_matches")
+    if chunks is None:
+        chunks = payload.get("chunks")
+    return RetrievalCandidates(
+        query_plan=query_plan,
+        entities=[
+            _entity_candidate_from_legacy(item)
+            for item in _legacy_list(entities, "entity candidates")
+        ],
+        relations=[
+            _relation_candidate_from_legacy(item)
+            for item in _legacy_list(relations, "relation candidates")
+        ],
+        chunks=[
+            _chunk_candidate_from_legacy(item)
+            for item in _legacy_list(chunks, "chunk candidates")
+        ],
+        metadata=_legacy_metadata(payload, _RETRIEVAL_CANDIDATE_LEGACY_FIELDS),
+    )
+
+
+def _entity_candidate_to_legacy(candidate: EntityCandidate) -> Dict[str, Any]:
+    payload = deepcopy(candidate.metadata)
+    payload.update(
+        {
+            "name": candidate.name,
+            "type": candidate.type,
+            "description": candidate.description,
+            "score": candidate.score,
+        }
+    )
+    return payload
+
+
+def _relation_candidate_to_legacy(candidate: RelationCandidate) -> Dict[str, Any]:
+    payload = deepcopy(candidate.metadata)
+    payload.update(
+        {
+            "source_name": candidate.source_name,
+            "target_name": candidate.target_name,
+            "description": candidate.description,
+            "keywords": candidate.keywords,
+            "score": candidate.score,
+        }
+    )
+    return payload
+
+
+def _chunk_candidate_to_legacy(candidate: ChunkCandidate) -> Dict[str, Any]:
+    payload = deepcopy(candidate.metadata)
+    payload.update(
+        {
+            "chunk_uuid": candidate.chunk_uuid,
+            "document_id": candidate.document_id,
+            "filename": candidate.filename,
+            "text": candidate.text,
+            "score": candidate.score,
+        }
+    )
+    return payload
+
+
+def retrieval_candidates_to_legacy(
+    candidates: RetrievalCandidates,
+) -> Dict[str, Any]:
+    """Convert shared candidates to PathRAG's current dictionary result keys."""
+
+    payload = deepcopy(candidates.metadata)
+    payload.update(
+        {
+            "entity_matches": [
+                _entity_candidate_to_legacy(candidate)
+                for candidate in candidates.entities
+            ],
+            "relation_matches": [
+                _relation_candidate_to_legacy(candidate)
+                for candidate in candidates.relations
+            ],
+            "chunk_matches": [
+                _chunk_candidate_to_legacy(candidate)
+                for candidate in candidates.chunks
+            ],
         }
     )
     return payload

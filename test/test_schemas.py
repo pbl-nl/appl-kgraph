@@ -29,6 +29,8 @@ from schemas import (
     RetrievedContext,
     extraction_result_from_legacy,
     extraction_result_to_legacy,
+    retrieval_candidates_from_legacy,
+    retrieval_candidates_to_legacy,
 )
 from extractor import parse_model_output
 from ingestion import build_chunks
@@ -138,6 +140,108 @@ def test_retrieval_candidate_defaults_are_not_shared():
 
     assert second.entities == []
     assert second.metadata == {}
+
+
+def test_pathrag_candidate_payload_round_trip():
+    query_plan = QueryPlan(query="How are Alpha and Beta related?")
+    entity_match = EntityMatch(
+        name="Alpha",
+        type="Organization",
+        description="Primary entity",
+        score=0.9,
+    )
+    relation_match = RelationMatch(
+        source_name="Alpha",
+        target_name="Beta",
+        description="Works with",
+        keywords="collaboration",
+        score=0.8,
+    )
+    chunk_match = ChunkMatch(
+        chunk_uuid="chunk-1",
+        document_id="doc-1",
+        filename="report.md",
+        text="Supporting text",
+        score=0.7,
+    )
+    legacy = {
+        "entity_matches": [entity_match],
+        "relation_matches": [relation_match],
+        "chunk_matches": [chunk_match],
+        "strategy": "pathrag",
+    }
+
+    candidates = retrieval_candidates_from_legacy(query_plan, legacy)
+
+    assert candidates.query_plan is query_plan
+    assert candidates.metadata == {"strategy": "pathrag"}
+    assert retrieval_candidates_to_legacy(candidates) == {
+        "entity_matches": [asdict(entity_match)],
+        "relation_matches": [asdict(relation_match)],
+        "chunk_matches": [asdict(chunk_match)],
+        "strategy": "pathrag",
+    }
+
+
+def test_lightrag_candidate_payload_preserves_ids_and_input_ownership():
+    query_plan = QueryPlan(query="Question")
+    legacy = {
+        "entities": [
+            {
+                "id": "Alpha",
+                "name": "Alpha",
+                "type": None,
+                "description": "Entity description",
+                "score": 0.9,
+            }
+        ],
+        "relations": [
+            {
+                "id": "Alpha::Beta",
+                "source_name": "Alpha",
+                "target_name": "Beta",
+                "description": "Related",
+                "keywords": "connection",
+                "score": 0.8,
+            }
+        ],
+        "chunks": [
+            {
+                "chunk_uuid": "chunk-1",
+                "document_id": "doc-1",
+                "filename": "report.md",
+                "text": "Supporting text",
+                "score": 0.7,
+            }
+        ],
+    }
+
+    candidates = retrieval_candidates_from_legacy(query_plan, legacy)
+
+    assert candidates.entities[0].metadata == {"id": "Alpha"}
+    assert candidates.relations[0].metadata == {"id": "Alpha::Beta"}
+    assert candidates.chunks[0].document_id == "doc-1"
+    emitted = retrieval_candidates_to_legacy(candidates)
+    assert emitted["entity_matches"][0]["id"] == "Alpha"
+    assert emitted["relation_matches"][0]["id"] == "Alpha::Beta"
+
+    legacy["entities"][0]["id"] = "Changed"
+    legacy["chunks"][0]["text"] = "Changed"
+    assert candidates.entities[0].metadata == {"id": "Alpha"}
+    assert candidates.chunks[0].text == "Supporting text"
+
+
+def test_retrieval_candidate_conversion_accepts_empty_payload():
+    query_plan = QueryPlan(query="Question")
+
+    candidates = retrieval_candidates_from_legacy(query_plan, {})
+
+    assert candidates == RetrievalCandidates(query_plan=query_plan)
+    assert retrieval_candidates_to_legacy(candidates) == {
+        "entity_matches": [],
+        "relation_matches": [],
+        "chunk_matches": [],
+    }
 
 
 def test_chunk_contract_accepts_current_ingestion_payload():

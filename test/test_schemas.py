@@ -1,5 +1,6 @@
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 
@@ -12,18 +13,23 @@ sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 from schemas import (
     AnswerResult,
     Chunk,
+    ChunkCandidate,
     DocumentRef,
     EnrichedDocument,
     Entity,
+    EntityCandidate,
     ExtractionResult,
     GraphDelta,
     QueryPlan,
     RawDocument,
     Relation,
+    RelationCandidate,
+    RetrievalCandidates,
     RetrievedContext,
 )
 from extractor import parse_model_output
 from ingestion import build_chunks
+from pathrag import ChunkMatch, EntityMatch, RelationMatch
 
 
 def test_pipeline_schema_objects_form_standalone_boundaries(tmp_path):
@@ -67,6 +73,68 @@ def test_schema_defaults_are_not_shared():
     assert second_extraction.content_keywords == []
     assert second_extraction.chunk_results == []
     assert second_extraction.diagnostics == []
+
+
+def test_retrieval_candidates_accept_current_pathrag_matches():
+    query_plan = QueryPlan(
+        query="How are Alpha and Beta related?",
+        high_level_keywords=["partnership"],
+        low_level_keywords=["Alpha", "Beta"],
+    )
+    entity_match = EntityMatch(
+        name="Alpha",
+        type="Organization",
+        description="Primary entity",
+        score=0.9,
+    )
+    relation_match = RelationMatch(
+        source_name="Alpha",
+        target_name="Beta",
+        description="Works with",
+        keywords="collaboration",
+        score=0.8,
+    )
+    chunk_match = ChunkMatch(
+        chunk_uuid="chunk-1",
+        document_id="doc-1",
+        filename="report.md",
+        text="Supporting text",
+        score=0.7,
+    )
+
+    candidates = RetrievalCandidates(
+        query_plan=query_plan,
+        entities=[EntityCandidate(**asdict(entity_match))],
+        relations=[RelationCandidate(**asdict(relation_match))],
+        chunks=[ChunkCandidate(**asdict(chunk_match))],
+    )
+
+    assert candidates.query_plan is query_plan
+    assert candidates.entities[0].name == "Alpha"
+    assert candidates.entities[0].score == 0.9
+    assert candidates.relations[0].keywords == "collaboration"
+    assert candidates.relations[0].score == 0.8
+    assert candidates.chunks[0].chunk_uuid == "chunk-1"
+    assert candidates.chunks[0].document_id == "doc-1"
+    assert candidates.chunks[0].score == 0.7
+
+
+def test_retrieval_candidate_defaults_are_not_shared():
+    first = RetrievalCandidates(query_plan=QueryPlan(query="first"))
+    second = RetrievalCandidates(query_plan=QueryPlan(query="second"))
+
+    first.entities.append(
+        EntityCandidate(
+            name="Alpha",
+            type=None,
+            description="",
+            score=0.5,
+        )
+    )
+    first.metadata["strategy"] = "pathrag"
+
+    assert second.entities == []
+    assert second.metadata == {}
 
 
 def test_chunk_contract_accepts_current_ingestion_payload():

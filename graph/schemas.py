@@ -93,6 +93,46 @@ class QueryPlan:
 
 
 @dataclass(frozen=True)
+class EntityCandidate:
+    name: str
+    type: Optional[str]
+    description: str
+    score: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RelationCandidate:
+    source_name: str
+    target_name: str
+    description: str
+    score: float
+    keywords: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ChunkCandidate:
+    chunk_uuid: str
+    document_id: str
+    filename: str
+    text: str
+    score: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RetrievalCandidates:
+    """Scored records returned by candidate retrieval before context assembly."""
+
+    query_plan: QueryPlan
+    entities: List[EntityCandidate] = field(default_factory=list)
+    relations: List[RelationCandidate] = field(default_factory=list)
+    chunks: List[ChunkCandidate] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class RetrievedContext:
     query_plan: QueryPlan
     context_windows: List[Any] = field(default_factory=list)

@@ -150,6 +150,91 @@ def test_retrieval_candidate_defaults_are_not_shared():
     assert second.metadata == {}
 
 
+def test_contract_metadata_is_owned_by_the_constructed_object():
+    metadata = {"provenance": {"tags": ["initial"]}}
+    entity = Entity(
+        name="Alpha",
+        type="Organization",
+        description="Entity",
+        metadata=metadata,
+    )
+    candidate = EntityCandidate(
+        name="Alpha",
+        type="Organization",
+        description="Entity",
+        score=0.5,
+        metadata=metadata,
+    )
+
+    metadata["provenance"]["tags"].append("changed")
+
+    assert entity.metadata == {"provenance": {"tags": ["initial"]}}
+    assert candidate.metadata == {"provenance": {"tags": ["initial"]}}
+
+
+def test_extraction_preserves_duplicates_but_graph_delta_requires_unique_names():
+    duplicate_entities = [
+        Entity(name="Alpha", type="Organization", description="First finding"),
+        Entity(name="Alpha", type="Organization", description="Second finding"),
+    ]
+
+    extraction = ExtractionResult(entities=duplicate_entities)
+
+    assert extraction.entities == duplicate_entities
+    with pytest.raises(ValueError, match="entity names must be unique"):
+        GraphDelta(entities=duplicate_entities)
+
+
+def test_graph_delta_requires_unique_undirected_relation_pairs():
+    relations = [
+        Relation(source_name="Alpha", target_name="Beta", description="Forward"),
+        Relation(source_name="Beta", target_name="Alpha", description="Reverse"),
+    ]
+
+    with pytest.raises(ValueError, match="relation pairs must be unique"):
+        GraphDelta(relations=relations)
+
+
+def test_graph_source_references_are_ordered_and_unique():
+    entity = Entity(
+        name="Alpha",
+        type="Organization",
+        description="Entity",
+        source_ids=("chunk-1", "chunk-2"),
+    )
+
+    assert entity.source_ids == ("chunk-1", "chunk-2")
+    with pytest.raises(ValueError, match="must not contain duplicates"):
+        Entity(
+            name="Alpha",
+            type="Organization",
+            description="Entity",
+            source_ids=("chunk-1", "chunk-1"),
+        )
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_retrieval_candidates_require_finite_scores(score):
+    with pytest.raises(ValueError, match="score must be finite"):
+        EntityCandidate(
+            name="Alpha",
+            type=None,
+            description="",
+            score=score,
+        )
+
+
+def test_retrieval_candidates_require_stable_identifiers():
+    with pytest.raises(ValueError, match="chunk candidate chunk_uuid must not be empty"):
+        ChunkCandidate(
+            chunk_uuid="",
+            document_id="doc-1",
+            filename="report.md",
+            text="Text",
+            score=0.5,
+        )
+
+
 def test_pathrag_candidate_payload_round_trip():
     query_plan = QueryPlan(query="How are Alpha and Beta related?")
     entity_match = EntityMatch(
@@ -386,7 +471,7 @@ def test_extraction_result_legacy_payload_round_trip():
                 "name": "Alpha",
                 "type": "Organization",
                 "description": "Primary entity",
-                "source_id": "chunk-1",
+                "source_id": "chunk-1||chunk-2",
                 "filepath": "/documents/report.md",
                 "confidence": 0.95,
             }
@@ -422,6 +507,7 @@ def test_extraction_result_legacy_payload_round_trip():
     result = extraction_result_from_legacy(legacy)
 
     assert result.entities[0].metadata == {"confidence": 0.95}
+    assert result.entities[0].source_ids == ("chunk-1", "chunk-2")
     assert result.relations[0].metadata == {"provenance": "model"}
     assert result.metadata == {"request_id": "request-1"}
     assert extraction_result_to_legacy(result) == expected

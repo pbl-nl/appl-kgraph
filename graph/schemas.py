@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, is_dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -20,11 +21,43 @@ def _require_non_negative_integer(value: Any, field_name: str) -> None:
         raise ValueError(f"{field_name} must be zero or greater")
 
 
+def _owned_metadata(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError("metadata must be a mapping")
+    return deepcopy(dict(value))
+
+
+def _normalized_source_ids(value: Any) -> Tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("source_ids must be a sequence of strings")
+    source_ids = tuple(value)
+    for source_id in source_ids:
+        _require_identifier(source_id, "source_id")
+    if len(set(source_ids)) != len(source_ids):
+        raise ValueError("source_ids must not contain duplicates")
+    return source_ids
+
+
+def _finite_score(value: Any, field_name: str = "score") -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{field_name} must be a number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{field_name} must be a number") from exc
+    if not isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
+    return number
+
+
 @dataclass(frozen=True)
 class DocumentRef:
     path: Path
     root: Optional[Path] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -66,6 +99,7 @@ class RawDocument:
         if self.text != "\n".join(text for _, text in normalized_pages):
             raise ValueError("document text must equal the newline-joined page text")
         object.__setattr__(self, "pages", tuple(normalized_pages))
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -73,6 +107,13 @@ class EnrichedDocument:
     raw: RawDocument
     text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.raw, RawDocument):
+            raise TypeError("raw must be a RawDocument")
+        if not isinstance(self.text, str):
+            raise TypeError("enriched text must be a string")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -104,6 +145,7 @@ class Chunk:
             raise TypeError("chunk text must be a string")
         if self.char_count != len(self.text):
             raise ValueError("char_count must equal the length of chunk text")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -111,9 +153,19 @@ class Entity:
     name: str
     type: str
     description: str
-    source_id: Optional[str] = None
+    source_ids: Tuple[str, ...] = field(default_factory=tuple)
     filepath: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.name, "entity name")
+        _require_identifier(self.type, "entity type")
+        if not isinstance(self.description, str):
+            raise TypeError("entity description must be a string")
+        object.__setattr__(self, "source_ids", _normalized_source_ids(self.source_ids))
+        if self.filepath is not None and not isinstance(self.filepath, str):
+            raise TypeError("entity filepath must be a string or None")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -123,9 +175,23 @@ class Relation:
     description: str
     keywords: str = ""
     weight: Optional[float] = None
-    source_id: Optional[str] = None
+    source_ids: Tuple[str, ...] = field(default_factory=tuple)
     filepath: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.source_name, "relation source_name")
+        _require_identifier(self.target_name, "relation target_name")
+        if not isinstance(self.description, str):
+            raise TypeError("relation description must be a string")
+        if not isinstance(self.keywords, str):
+            raise TypeError("relation keywords must be a string")
+        if self.weight is not None:
+            object.__setattr__(self, "weight", _finite_score(self.weight, "weight"))
+        object.__setattr__(self, "source_ids", _normalized_source_ids(self.source_ids))
+        if self.filepath is not None and not isinstance(self.filepath, str):
+            raise TypeError("relation filepath must be a string or None")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -139,12 +205,35 @@ class ExtractionResult:
     diagnostics: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not all(isinstance(entity, Entity) for entity in self.entities):
+            raise TypeError("entities must contain Entity objects")
+        if not all(isinstance(relation, Relation) for relation in self.relations):
+            raise TypeError("relations must contain Relation objects")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
 
 @dataclass(frozen=True)
 class GraphDelta:
     entities: List[Entity] = field(default_factory=list)
     relations: List[Relation] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not all(isinstance(entity, Entity) for entity in self.entities):
+            raise TypeError("entities must contain Entity objects")
+        if not all(isinstance(relation, Relation) for relation in self.relations):
+            raise TypeError("relations must contain Relation objects")
+        entity_names = [entity.name for entity in self.entities]
+        if len(set(entity_names)) != len(entity_names):
+            raise ValueError("GraphDelta entity names must be unique")
+        relation_pairs = [
+            tuple(sorted((relation.source_name, relation.target_name)))
+            for relation in self.relations
+        ]
+        if len(set(relation_pairs)) != len(relation_pairs):
+            raise ValueError("GraphDelta relation pairs must be unique")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -155,6 +244,11 @@ class QueryPlan:
     low_level_keywords: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.query, str):
+            raise TypeError("query must be a string")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
 
 @dataclass(frozen=True)
 class EntityCandidate:
@@ -163,6 +257,15 @@ class EntityCandidate:
     description: str
     score: float
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.name, "entity candidate name")
+        if self.type is not None and not isinstance(self.type, str):
+            raise TypeError("entity candidate type must be a string or None")
+        if not isinstance(self.description, str):
+            raise TypeError("entity candidate description must be a string")
+        object.__setattr__(self, "score", _finite_score(self.score))
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -174,6 +277,16 @@ class RelationCandidate:
     keywords: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        _require_identifier(self.source_name, "relation candidate source_name")
+        _require_identifier(self.target_name, "relation candidate target_name")
+        if not isinstance(self.description, str):
+            raise TypeError("relation candidate description must be a string")
+        if not isinstance(self.keywords, str):
+            raise TypeError("relation candidate keywords must be a string")
+        object.__setattr__(self, "score", _finite_score(self.score))
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
 
 @dataclass(frozen=True)
 class ChunkCandidate:
@@ -183,6 +296,16 @@ class ChunkCandidate:
     text: str
     score: float
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.chunk_uuid, "chunk candidate chunk_uuid")
+        _require_identifier(self.document_id, "chunk candidate document_id")
+        if not isinstance(self.filename, str):
+            raise TypeError("chunk candidate filename must be a string")
+        if not isinstance(self.text, str):
+            raise TypeError("chunk candidate text must be a string")
+        object.__setattr__(self, "score", _finite_score(self.score))
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -195,6 +318,17 @@ class RetrievalCandidates:
     chunks: List[ChunkCandidate] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.query_plan, QueryPlan):
+            raise TypeError("query_plan must be a QueryPlan")
+        if not all(isinstance(item, EntityCandidate) for item in self.entities):
+            raise TypeError("entities must contain EntityCandidate objects")
+        if not all(isinstance(item, RelationCandidate) for item in self.relations):
+            raise TypeError("relations must contain RelationCandidate objects")
+        if not all(isinstance(item, ChunkCandidate) for item in self.chunks):
+            raise TypeError("chunks must contain ChunkCandidate objects")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
 
 @dataclass(frozen=True)
 class RetrievedContext:
@@ -205,6 +339,11 @@ class RetrievedContext:
     chunks: List[Chunk] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.query_plan, QueryPlan):
+            raise TypeError("query_plan must be a QueryPlan")
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
 
 @dataclass(frozen=True)
 class AnswerResult:
@@ -213,12 +352,23 @@ class AnswerResult:
     model: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.answer, str):
+            raise TypeError("answer must be a string")
+        if not isinstance(self.context, RetrievedContext):
+            raise TypeError("context must be a RetrievedContext")
+        if not isinstance(self.model, Mapping):
+            raise TypeError("model must be a mapping")
+        object.__setattr__(self, "model", deepcopy(dict(self.model)))
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
 
 _ENTITY_LEGACY_FIELDS = {
     "name",
     "type",
     "description",
     "source_id",
+    "source_ids",
     "filepath",
     "metadata",
 }
@@ -229,6 +379,7 @@ _RELATION_LEGACY_FIELDS = {
     "keywords",
     "weight",
     "source_id",
+    "source_ids",
     "filepath",
     "metadata",
 }
@@ -281,8 +432,10 @@ def _legacy_metadata(
     payload: Mapping[str, Any],
     known_fields: set,
 ) -> Dict[str, Any]:
-    nested = payload.get("metadata") or {}
-    if not isinstance(nested, Mapping):
+    nested = payload.get("metadata")
+    if nested is None:
+        nested = {}
+    elif not isinstance(nested, Mapping):
         raise TypeError("legacy metadata must be a mapping")
     metadata = deepcopy(dict(nested))
     for key, value in payload.items():
@@ -299,13 +452,28 @@ def _legacy_list(value: Any, field_name: str) -> List[Any]:
     return deepcopy(list(value))
 
 
+def _source_ids_from_legacy(payload: Mapping[str, Any]) -> Tuple[str, ...]:
+    value = payload.get("source_ids")
+    if value is None:
+        value = payload.get("source_id")
+    if value is None or value == "":
+        return ()
+    if isinstance(value, str):
+        values = tuple(part.strip() for part in value.split("||") if part.strip())
+    elif isinstance(value, Sequence) and not isinstance(value, bytes):
+        values = tuple(value)
+    else:
+        raise TypeError("legacy source_id must be a string or sequence")
+    return _normalized_source_ids(values)
+
+
 def _entity_from_legacy(payload: Any) -> Entity:
     if isinstance(payload, Entity):
         return Entity(
             name=payload.name,
             type=payload.type,
             description=payload.description,
-            source_id=payload.source_id,
+            source_ids=payload.source_ids,
             filepath=payload.filepath,
             metadata=deepcopy(payload.metadata),
         )
@@ -315,8 +483,8 @@ def _entity_from_legacy(payload: Any) -> Entity:
         name=payload.get("name", ""),
         type=payload.get("type", "unknown") or "unknown",
         description=payload.get("description", "") or "",
-        source_id=payload.get("source_id"),
-        filepath=payload.get("filepath"),
+        source_ids=_source_ids_from_legacy(payload),
+        filepath=payload.get("filepath") or None,
         metadata=_legacy_metadata(payload, _ENTITY_LEGACY_FIELDS),
     )
 
@@ -329,7 +497,7 @@ def _relation_from_legacy(payload: Any) -> Relation:
             description=payload.description,
             keywords=payload.keywords,
             weight=payload.weight,
-            source_id=payload.source_id,
+            source_ids=payload.source_ids,
             filepath=payload.filepath,
             metadata=deepcopy(payload.metadata),
         )
@@ -341,8 +509,8 @@ def _relation_from_legacy(payload: Any) -> Relation:
         description=payload.get("description", "") or "",
         keywords=payload.get("keywords", "") or "",
         weight=payload.get("weight"),
-        source_id=payload.get("source_id"),
-        filepath=payload.get("filepath"),
+        source_ids=_source_ids_from_legacy(payload),
+        filepath=payload.get("filepath") or None,
         metadata=_legacy_metadata(payload, _RELATION_LEGACY_FIELDS),
     )
 
@@ -382,7 +550,7 @@ def _entity_to_legacy(entity: Entity) -> Dict[str, Any]:
             "name": entity.name,
             "type": entity.type,
             "description": entity.description,
-            "source_id": entity.source_id,
+            "source_id": "||".join(entity.source_ids) or None,
             "filepath": entity.filepath,
         }
     )
@@ -398,7 +566,7 @@ def _relation_to_legacy(relation: Relation) -> Dict[str, Any]:
             "description": relation.description,
             "keywords": relation.keywords,
             "weight": relation.weight,
-            "source_id": relation.source_id,
+            "source_id": "||".join(relation.source_ids) or None,
             "filepath": relation.filepath,
         }
     )

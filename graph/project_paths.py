@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Union
 
-from settings import VALID_EXTENSIONS, StoragePaths, settings
+from discovery import discover_documents
+from settings import StoragePaths, settings
 
 
 @dataclass(frozen=True)
@@ -86,21 +87,8 @@ def list_document_paths(
     *,
     valid_extensions: Optional[Iterable[str]] = None,
 ) -> List[Path]:
-    root = Path(documents_root).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        return []
-
-    allowed = {ext.lower() for ext in (valid_extensions or VALID_EXTENSIONS)}
-    project_root = root / settings.project.artifacts_dirname
-    paths: List[Path] = []
-
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if project_root in path.parents:
-            continue
-        if path.suffix.lower() not in allowed:
-            continue
-        paths.append(path)
-
-    return sorted(paths, key=lambda item: str(item).lower())
+    documents = discover_documents(
+        Path(documents_root),
+        valid_extensions=valid_extensions,
+    )
+    return [document.path for document in documents]

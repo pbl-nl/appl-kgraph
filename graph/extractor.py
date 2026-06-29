@@ -56,21 +56,6 @@ def build_entity_validation_prompt(
     )
 
 
-def build_entity_audit_prompt(
-    text: str,
-    *,
-    initial_extraction: str,
-    language: Optional[str] = None,
-    entity_types: Optional[Iterable[str]] = None,
-) -> str:
-    return build_entity_validation_prompt(
-        text,
-        initial_extraction=initial_extraction,
-        language=language,
-        entity_types=entity_types,
-    )
-
-
 @dataclass
 class ParsedOutput:
     entities: List[Dict[str, Any]]
@@ -304,26 +289,19 @@ def _parse_validation_output(raw: str) -> Dict[str, Any]:
     }
 
 
-def _parse_audit_output(raw: str) -> Dict[str, Any]:
-    return _parse_validation_output(raw)
-
-
 def extract_from_chunks(
     chunks: Iterable[Dict[str, Any]],
     language: Optional[str] = None,
     entity_types: Optional[Iterable[str]] = None,
     client: Optional[Chat] = None,
     storage: Optional[Storage] = None,
-    audit_enabled: Optional[bool] = None,
     validation_enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    '''Extract entities and relationships from the provided chunks using LLM prompts, with optional caching and auditing.'''
+    '''Extract entities and relationships from chunks with optional cached validation.'''
     chat = client or Chat.singleton()
     active_storage = _ensure_storage(storage)
     chunk_list = list(chunks)
     resolved_entity_types = list(entity_types or _default_entity_types())
-    if validation_enabled is None:
-        validation_enabled = audit_enabled
     do_validation = (
         settings.extraction.validation_second_pass_enabled
         if validation_enabled is None
@@ -440,7 +418,6 @@ def extract_from_chunks(
         "content_keywords": sorted(set(all_keywords)),
         "chunk_results": chunk_results,
         "validation_results": validation_results,
-        "audits": validation_results,
     }
 
 

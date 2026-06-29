@@ -100,6 +100,8 @@ def test_write_raw_document_snapshot_writes_canonical_storage_payload(tmp_path):
     assert payload["char_count"] == 0
     assert payload["raw_text"] == ""
     assert payload["extracted_at"].endswith("+00:00")
+
+
 def test_extraction_diagnostics_respect_internal_logging_gate(tmp_path, monkeypatch):
     documents_root = tmp_path / "docs"
     documents_root.mkdir()
@@ -126,3 +128,34 @@ def test_extraction_diagnostics_respect_internal_logging_gate(tmp_path, monkeypa
 
     target = project_paths.extraction_diagnostics_dir / "report.validation.json"
     assert target.exists()
+
+
+class _EmptyStorage:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def init(self):
+        return None
+
+    def get_all_documents(self):
+        return []
+
+
+def test_ingestion_progress_callback_respects_verbosity_gate(monkeypatch):
+    messages = []
+    monkeypatch.setattr(ingestion, "Storage", _EmptyStorage)
+    monkeypatch.setattr(
+        ingestion,
+        "settings",
+        SimpleNamespace(
+            logging=SimpleNamespace(
+                internal_logging_enabled=False,
+                internal_log_level="INFO",
+                verbosity_enabled=False,
+            )
+        ),
+    )
+
+    ingestion.ingest_paths([], progress_callback=messages.append)
+
+    assert messages == []

@@ -131,7 +131,7 @@ Desired type: `AnswerResult`.
 
 ## Test Expectations
 
-- Settings tests cover audit, verbosity, internal logging, internal log level, and deprecated aliases.
+- Settings tests cover audit, verbosity, internal logging, internal log level, and ignored legacy observability variables.
 - Audit JSON tests assert chatbot reproducibility payloads are written under audit paths.
 - Extraction validation tests assert diagnostic sidecars are gated by internal logging and named as validation output.
 - Retrieval tests assert `top_k_chunk_per_entity` is read from settings.

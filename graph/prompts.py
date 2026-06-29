@@ -256,8 +256,6 @@ Use {language} for any natural-language explanations.
 JSON:
 """
 
-PROMPTS["entity_extraction_audit"] = PROMPTS["entity_extraction_validation"]
-
 PROMPTS["fail_response"] = (
     "Sorry, I'm not able to provide an answer to that question.[no-context]"
 )

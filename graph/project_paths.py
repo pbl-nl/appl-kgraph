@@ -20,10 +20,6 @@ class ProjectPaths:
     audit_logs_dir: Path
     diagnostics_dir: Path
     extraction_diagnostics_dir: Path
-    # Deprecated aliases kept for one transition period.
-    qa_logs_dir: Path
-    audits_dir: Path
-    extraction_audits_dir: Path
     storage: StoragePaths
     ingestion_log_file: Path
     pathrag_log_file: Path
@@ -64,9 +60,6 @@ def resolve_project_paths(documents_root: Union[Path, str]) -> ProjectPaths:
         audit_logs_dir=audit_logs_dir,
         diagnostics_dir=diagnostics_dir,
         extraction_diagnostics_dir=extraction_diagnostics_dir,
-        qa_logs_dir=audit_logs_dir,
-        audits_dir=diagnostics_dir,
-        extraction_audits_dir=extraction_diagnostics_dir,
         storage=storage,
         ingestion_log_file=logs_dir / "ingestion.log",
         pathrag_log_file=logs_dir / "pathrag.log",

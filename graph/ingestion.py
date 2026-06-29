@@ -203,14 +203,6 @@ def _write_extraction_diagnostics(
     )
 
 
-def _write_extraction_audits(
-    project_paths: Optional[ProjectPaths],
-    filename: str,
-    audits: List[Dict[str, Any]],
-) -> None:
-    _write_extraction_diagnostics(project_paths, filename, audits)
-
-
 def _write_raw_document_snapshot(
     project_paths: Optional[ProjectPaths],
     *,
@@ -233,21 +225,6 @@ def _write_raw_document_snapshot(
     }
     target = project_paths.raw_documents_dir / f"{Path(filename).name}.raw.json"
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _write_raw_text_audit(
-    project_paths: Optional[ProjectPaths],
-    *,
-    filename: str,
-    doc_meta: Dict[str, Any],
-    raw_text: str,
-) -> None:
-    _write_raw_document_snapshot(
-        project_paths,
-        filename=filename,
-        doc_meta=doc_meta,
-        raw_text=raw_text,
-    )
 
 
 def _write_retrieval_graph_snapshot(
@@ -782,7 +759,6 @@ def ingest_paths(
     documents_root: Optional[Union[Path, str]] = None,
     project_paths: Optional[ProjectPaths] = None,
     storage_paths=None,
-    audit_enabled: Optional[bool] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -920,7 +896,6 @@ def ingest_paths(
         res = extract_from_chunks(
             chunks,
             storage=storage,
-            validation_enabled=audit_enabled,
         )
         
         # Consolidate/merge entities (by (name,type)) and upsert those first
@@ -945,11 +920,7 @@ def ingest_paths(
             report(f"{step_prefix} - writing {len(edges)} relations")
             storage.upsert_edges(edges)                 # write schema
             all_relations.extend(edges)                 # collect for vector DB later
-        validation_results = (
-            res.get("validation_results")
-            or res.get("audits")
-            or []
-        )
+        validation_results = res.get("validation_results") or []
         if validation_results:
             report(f"{step_prefix} - writing extraction diagnostics")
         _write_extraction_diagnostics(active_project_paths, p.name, validation_results)

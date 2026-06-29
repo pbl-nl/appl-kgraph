@@ -90,10 +90,6 @@ class ProjectSettings:
     audit_logs_dirname: str = "audit"
     diagnostics_dirname: str = "diagnostics"
     extraction_diagnostics_dirname: str = "extraction"
-    # Deprecated aliases kept for one transition period.
-    qa_logs_dirname: str = "qa"
-    audits_dirname: str = "audits"
-    extraction_audits_dirname: str = "extraction"
 
 
 @dataclass(frozen=True)
@@ -102,10 +98,6 @@ class ExtractionSettings:
     detect_chunk_language: bool = False
     validation_second_pass_enabled: bool = False
 
-    @property
-    def audit_second_pass_enabled(self) -> bool:
-        return self.validation_second_pass_enabled
-
 
 @dataclass(frozen=True)
 class LoggingSettings:
@@ -113,26 +105,6 @@ class LoggingSettings:
     verbosity_enabled: bool = True
     internal_logging_enabled: bool = True
     internal_log_level: str = "INFO"
-
-    @property
-    def ingestion_enabled(self) -> bool:
-        return self.internal_logging_enabled
-
-    @property
-    def retrieval_enabled(self) -> bool:
-        return self.internal_logging_enabled
-
-    @property
-    def ingestion_level(self) -> str:
-        return self.internal_log_level
-
-    @property
-    def retrieval_level(self) -> str:
-        return self.internal_log_level
-
-    @property
-    def qa_enabled(self) -> bool:
-        return self.audit_enabled
 
 
 @dataclass(frozen=True)
@@ -300,25 +272,13 @@ def load_settings() -> Settings:
         )
         or "raw_documents",
         logs_dirname=ut.env_str("PROJECT_LOGS_DIRNAME", "logs") or "logs",
-        audit_logs_dirname=(
-            ut.env_str("PROJECT_AUDIT_LOGS_DIRNAME")
-            or ut.env_str("PROJECT_QA_LOGS_DIRNAME")
-            or "audit"
-        ),
-        diagnostics_dirname=(
-            ut.env_str("PROJECT_DIAGNOSTICS_DIRNAME")
-            or ut.env_str("PROJECT_AUDITS_DIRNAME")
-            or "diagnostics"
-        ),
-        extraction_diagnostics_dirname=(
-            ut.env_str("PROJECT_EXTRACTION_DIAGNOSTICS_DIRNAME")
-            or ut.env_str("PROJECT_EXTRACTION_AUDITS_DIRNAME")
-            or "extraction"
-        ),
-        qa_logs_dirname=ut.env_str("PROJECT_QA_LOGS_DIRNAME", "qa") or "qa",
-        audits_dirname=ut.env_str("PROJECT_AUDITS_DIRNAME", "audits") or "audits",
-        extraction_audits_dirname=ut.env_str(
-            "PROJECT_EXTRACTION_AUDITS_DIRNAME", "extraction"
+        audit_logs_dirname=ut.env_str("PROJECT_AUDIT_LOGS_DIRNAME", "audit")
+        or "audit",
+        diagnostics_dirname=ut.env_str("PROJECT_DIAGNOSTICS_DIRNAME", "diagnostics")
+        or "diagnostics",
+        extraction_diagnostics_dirname=ut.env_str(
+            "PROJECT_EXTRACTION_DIAGNOSTICS_DIRNAME",
+            "extraction",
         )
         or "extraction",
     )
@@ -328,31 +288,15 @@ def load_settings() -> Settings:
         detect_chunk_language=ut.env_bool("EXTRACTION_DETECT_CHUNK_LANGUAGE", False),
         validation_second_pass_enabled=ut.env_bool(
             "EXTRACTION_VALIDATION_SECOND_PASS_ENABLED",
-            ut.env_bool("EXTRACTION_AUDIT_SECOND_PASS_ENABLED", False),
+            False,
         ),
     )
 
-    internal_logging_default = (
-        ut.env_bool("INGESTION_LOG_ENABLED", True)
-        or ut.env_bool("RETRIEVAL_LOG_ENABLED", True)
-    )
-    internal_log_level = (
-        ut.env_str("INTERNAL_LOG_LEVEL")
-        or ut.env_str("RETRIEVAL_LOG_LEVEL")
-        or ut.env_str("INGESTION_LOG_LEVEL")
-        or "INFO"
-    )
     logging_settings = LoggingSettings(
-        audit_enabled=ut.env_bool(
-            "AUDIT_ENABLED",
-            ut.env_bool("QA_LOG_ENABLED", True),
-        ),
+        audit_enabled=ut.env_bool("AUDIT_ENABLED", True),
         verbosity_enabled=ut.env_bool("VERBOSITY_ENABLED", True),
-        internal_logging_enabled=ut.env_bool(
-            "INTERNAL_LOGGING_ENABLED",
-            internal_logging_default,
-        ),
-        internal_log_level=internal_log_level,
+        internal_logging_enabled=ut.env_bool("INTERNAL_LOGGING_ENABLED", True),
+        internal_log_level=ut.env_str("INTERNAL_LOG_LEVEL", "INFO") or "INFO",
     )
 
     retrieval = RetrievalSettings(

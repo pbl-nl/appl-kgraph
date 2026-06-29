@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterator, List, Optional, Tuple
 
 import gradio as gr
+import textwrap
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -24,17 +25,11 @@ from project_paths import (
     resolve_project_paths,
 )
 
-# =====================================================
-# -------- INITIAL RANDOM GRAPH CREATION --------------
-# =====================================================
-
 mygraph = nx.Graph()
 _PATHRAG_CACHE: dict[str, PathRAG] = {}
 _LIGHTRAG_CACHE: dict[str, LightRAG] = {}
 
-# =====================================================
-# -------- DYNAMIC COLOR GENERATION -------------------
-# =====================================================
+
 def generate_dynamic_type_colors(graph):
     types = sorted(set(data.get("type", "Unknown") for _, data in graph.nodes(data=True)))
     if not types:
@@ -47,14 +42,58 @@ def generate_legend_html(graph: Optional[nx.Graph] = None) -> str:
     colors = generate_dynamic_type_colors(graph or nx.Graph())
     html = "<div style='padding:5px;'><b>Legend:</b><br>"
     for key, color in colors.items():
-        html += "<div style='display:flex;align-items:center;margin:2px;'>"
         html += (
+            "<div style='display:flex;align-items:center;margin:2px;'>"
             f"<div style='width:20px;height:20px;background-color:{color};"
-            "margin-right:5px;border:1px solid #fff;'></div>"
-            f"{key}</div>"
+            f"margin-right:5px;border:1px solid #fff;'></div>{key}</div>"
         )
     html += "</div>"
     return html
+
+
+def _legend_overlay_html(type_colors: dict[str, str]) -> str:
+    if not type_colors:
+        return ""
+    rows = []
+    for node_type, color in sorted(type_colors.items()):
+        safe_type = html.escape(str(node_type))
+        rows.append(
+            "<div style='display:flex;align-items:center;gap:8px;margin:3px 0;'>"
+            f"<span style='display:inline-block;width:12px;height:12px;border-radius:2px;background:{color};"
+            "border:1px solid rgba(255,255,255,0.35);'></span>"
+            f"<span>{safe_type}</span>"
+            "</div>"
+        )
+    rows_html = "".join(rows)
+    return (
+        "<div id='kg-legend' style='position:fixed;top:12px;right:12px;z-index:9999;padding:10px 12px;"
+        "max-width:280px;background:rgba(17,17,17,0.84);border:1px solid rgba(255,255,255,0.2);"
+        "border-radius:8px;color:#f8fafc;font-family:Arial,sans-serif;font-size:12px;line-height:1.25;"
+        "box-shadow:0 6px 18px rgba(0,0,0,0.28);backdrop-filter:blur(2px);'>"
+        "<div style='display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;'>"
+        "<div style='font-weight:700;'>Legend</div>"
+        "<button id='kg-legend-toggle' type='button' "
+        "style='cursor:pointer;background:#0f172a;color:#f8fafc;border:1px solid rgba(255,255,255,0.25);"
+        "border-radius:6px;padding:2px 8px;font-size:11px;line-height:1.4;'>Hide</button>"
+        "</div>"
+        "<div id='kg-legend-content'>"
+        f"{rows_html}"
+        "</div>"
+        "</div>"
+        "<script>"
+        "(function(){"
+        "var btn=document.getElementById('kg-legend-toggle');"
+        "var content=document.getElementById('kg-legend-content');"
+        "var box=document.getElementById('kg-legend');"
+        "if(!btn||!content||!box){return;}"
+        "btn.addEventListener('click',function(){"
+        "var hidden=content.style.display==='none';"
+        "if(hidden){content.style.display='block';btn.textContent='Hide';box.style.padding='10px 12px';}"
+        "else{content.style.display='none';btn.textContent='Show';box.style.padding='8px 10px';}"
+        "});"
+        "})();"
+        "</script>"
+    )
 
 
 def _project_paths_for_folder(folder_path: str) -> Optional[ProjectPaths]:
@@ -90,32 +129,82 @@ def _save_graph_pickle(folder_path: str, graph: nx.Graph) -> Optional[Path]:
 
 def render_graph_iframe(graph: nx.Graph, height_px: int = 650) -> str:
     type_colors = generate_dynamic_type_colors(graph)
-    net = Network(height=f"{height_px}px", width="100%", directed=False, bgcolor="#111111", font_color="white")
+    net = Network(
+        height=f"{height_px}px", width="100%",
+        directed=False, bgcolor="#111111", font_color="white",
+    )
+
+    degrees = dict(graph.degree())
+    max_degree = max(degrees.values(), default=1)
+    min_size, max_size = 8, 40
+
     for node, data in graph.nodes(data=True):
+        node_raw_filepath = data.get("filepath", "") or ""
+        node_doc_names = ",\n".join(
+            sorted({Path(p.strip()).name for p in node_raw_filepath.split("||") if p.strip()})
+        )
+        node_doc_line = f"doc(s) = {node_doc_names}" if node_doc_names else ""
+        node_label = str(data.get("label", node))
+        node_description = f"description = {textwrap.fill(data.get("description", ""), width=80)}"
+        node_title = f"{node_label}\n{node_doc_line}\n{node_description}"
         node_type = data.get("type", "unknown")
-        title = f"type={node_type}\n{data.get('description', '')}"
-        color = type_colors.get(node_type, "#0EA5E9")
-        label = str(data.get("label", node))
-        net.add_node(str(node), label=label, title=title, color=color)
+        node_color = type_colors.get(node_type, "#0EA5E9")
+        node_degree = degrees.get(node, 1)
+        node_size = min_size + (max_size - min_size) * (node_degree / max_degree)
+        net.add_node(str(node), label=node_label, title=node_title, color=node_color, size=node_size)
 
     for source, target, data in graph.edges(data=True):
-        title = data.get("description", "") or data.get("keywords", "")
-        net.add_edge(str(source), str(target), title=title, value=float(data.get("weight", 1.0) or 1.0))
+        edge_keywords = data.get("keywords", "") or ""
+        edge_description = data.get("description", "") or ""
+        net.add_edge(
+            str(source), str(target),
+            title=edge_description or edge_keywords,
+            value=float(data.get("weight", 1.0) or 1.0),
+        )
 
-    net.set_options(
-        """
+    net.set_options("""
         var options = {
-          "nodes": { "shape": "dot", "size": 14, "font": { "strokeWidth": 8 } },
-          "edges": { "smooth": false, "color": { "color": "#94A3B8" } },
-          "physics": { "enabled": false },
-          "interaction": { "hover": true, "navigationButtons": true }
+          "nodes": {
+            "shape": "dot",
+            "font": { "size": 12, "strokeWidth": 2, "strokeColor": "#111111" }
+          },
+          "edges": {
+            "smooth": { "type": "dynamic" },
+            "color": { "color": "#94A3B8", "highlight": "#F59E0B" },
+            "font": { "size": 9, "strokeWidth": 1, "strokeColor": "#111111", "align": "middle" },
+            "scaling": { "min": 1, "max": 6 }
+          },
+          "physics": {
+            "enabled": true,
+            "solver": "forceAtlas2Based",
+            "forceAtlas2Based": {
+              "gravitationalConstant": -60,
+              "centralGravity": 0.005,
+              "springLength": 140,
+              "springConstant": 0.08,
+              "damping": 0.4
+            },
+            "stabilization": { "enabled": true, "iterations": 250, "fit": true }
+          },
+          "interaction": {
+            "hover": true,
+            "navigationButtons": true,
+            "keyboard": true,
+            "multiselect": true,
+            "tooltipDelay": 100
+          }
         }
-        """
-    )
+    """)
 
     tmp_path = Path(tempfile.gettempdir()) / "appl_kgraph_graph.html"
     net.save_graph(str(tmp_path))
     rendered = tmp_path.read_text(encoding="utf-8")
+    legend_overlay = _legend_overlay_html(type_colors)
+    if legend_overlay:
+        if "</body>" in rendered:
+            rendered = rendered.replace("</body>", f"{legend_overlay}</body>", 1)
+        else:
+            rendered += legend_overlay
     return (
         f'<iframe srcdoc="{html.escape(rendered, quote=True)}" '
         f'style="width:100%;height:{height_px}px;border:none;border-radius:8px;" '
@@ -161,21 +250,25 @@ def _dropdown_choices() -> List[Tuple[str, str]]:
     return sorted(choices, key=lambda item: item[0].lower())
 
 
-def update_dropdowns():
+def update_dropdowns() -> Tuple[Any, Any, Any]:
     choices = _dropdown_choices()
-    return [gr.update(choices=choices, value=None) for _ in range(3)]
+    return (
+        gr.update(choices=choices, value=None),
+        gr.update(choices=choices, value=None),
+        gr.update(choices=choices, value=None),
+    )
 
 
 def _ingestion_payload(
     graph: nx.Graph,
     status: str,
     active_folder_value: str,
-) -> Tuple[str, str, str, str, Any, Any, Any]:
+) -> Tuple[str, str, str, Any, Any, Any]:
     updates = update_dropdowns()
-    return render_graph_iframe(graph), generate_legend_html(graph), status, active_folder_value, *updates
+    return render_graph_iframe(graph), status, active_folder_value, *updates
 
 
-def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, str, Any, Any, Any]]:
+def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any, Any]]:
     global mygraph
 
     if not folder_path or not Path(folder_path).is_dir():
@@ -213,7 +306,7 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, str, Any
                 documents_root=documents_root,
                 progress_callback=_report_progress,
             )
-        except Exception as exc:  # pragma: no cover - UI integration guard
+        except Exception as exc:
             error["exception"] = exc
         finally:
             progress_queue.put("__DONE__")
@@ -226,10 +319,8 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, str, Any
             message = progress_queue.get(timeout=0.2)
         except queue.Empty:
             continue
-
         if message == "__DONE__":
             break
-
         progress_messages.append(message)
         yield _ingestion_payload(mygraph, "\n".join(progress_messages[-50:]), str(documents_root))
 
@@ -276,50 +367,37 @@ def save_current_graph(folder_path: str) -> str:
     return f"Saved working graph pickle to {saved_path}"
 
 
-def load_saved_graph(folder_path: str) -> Tuple[str, str, str, Any, Any, Any]:
+def load_saved_graph(folder_path: str) -> Tuple[str, str, Any, Any, Any]:
     global mygraph
+    updates = update_dropdowns()
 
     if not folder_path:
-        updates = update_dropdowns()
-        return render_graph_iframe(mygraph), generate_legend_html(mygraph), "Select and ingest a document folder first.", *updates
+        return render_graph_iframe(mygraph), "Select and ingest a document folder first.", *updates
 
     project_paths = resolve_project_paths(folder_path)
     if not project_paths.graph_pickle_file.exists():
-        updates = update_dropdowns()
-        return (
-            render_graph_iframe(mygraph),
-            generate_legend_html(mygraph),
-            f"No saved graph pickle found yet at {project_paths.graph_pickle_file}",
-            *updates,
-        )
+        return render_graph_iframe(mygraph), f"No saved graph pickle found yet at {project_paths.graph_pickle_file}", *updates
 
     try:
         mygraph = _load_graph_from_pickle(folder_path)
         message = f"Loaded working graph pickle from {project_paths.graph_pickle_file}"
     except Exception as exc:
-        updates = update_dropdowns()
-        return render_graph_iframe(mygraph), generate_legend_html(mygraph), f"Failed to load saved graph pickle: {exc}", *updates
+        return render_graph_iframe(mygraph), f"Failed to load saved graph pickle: {exc}", *updates
 
     updates = update_dropdowns()
-    return render_graph_iframe(mygraph), generate_legend_html(mygraph), message, *updates
+    return render_graph_iframe(mygraph), message, *updates
 
 
-def merge_nodes(
-    node1: str,
-    node2: str,
-    active_folder: str,
-) -> Tuple[str, str, str, Any, Any, Any]:
+def merge_nodes(node1: str, node2: str, active_folder: str) -> Tuple[str, str, Any, Any, Any]:
     global mygraph
+    updates = update_dropdowns()
 
     if not node1 or not node2:
-        updates = update_dropdowns()
-        return render_graph_iframe(mygraph), generate_legend_html(mygraph), "Select two nodes to merge.", *updates
+        return render_graph_iframe(mygraph), "Select two nodes to merge.", *updates
     if node1 not in mygraph or node2 not in mygraph:
-        updates = update_dropdowns()
-        return render_graph_iframe(mygraph), generate_legend_html(mygraph), "Both nodes must exist in the current graph.", *updates
+        return render_graph_iframe(mygraph), "Both nodes must exist in the current graph.", *updates
     if node1 == node2:
-        updates = update_dropdowns()
-        return render_graph_iframe(mygraph), generate_legend_html(mygraph), "Cannot merge the same node into itself.", *updates
+        return render_graph_iframe(mygraph), "Cannot merge the same node into itself.", *updates
 
     new_node = f"{node1}_{node2}"
     suffix = 1
@@ -329,13 +407,8 @@ def merge_nodes(
 
     label1 = mygraph.nodes[node1].get("label", node1)
     label2 = mygraph.nodes[node2].get("label", node2)
-    mygraph.add_node(
-        new_node,
-        label=f"{label1} + {label2}",
-        type="Merged",
-        description=f"Merged from {node1} and {node2}",
-        source="Merged",
-    )
+    mygraph.add_node(new_node, label=f"{label1} + {label2}", type="Merged",
+                     description=f"Merged from {node1} and {node2}", source="Merged")
 
     for original in (node1, node2):
         for neighbor, attrs in list(mygraph[original].items()):
@@ -343,31 +416,20 @@ def merge_nodes(
                 mygraph.add_edge(new_node, neighbor, **attrs)
         mygraph.remove_node(original)
 
-    autosave = ""
     saved_path = _save_graph_pickle(active_folder, mygraph)
-    if saved_path is not None:
-        autosave = f" Auto-saved to {saved_path}."
-
+    autosave = f" Auto-saved to {saved_path}." if saved_path else ""
     updates = update_dropdowns()
-    return render_graph_iframe(mygraph), generate_legend_html(mygraph), f"Merged '{node1}' and '{node2}' into '{new_node}'.{autosave}", *updates
+    return render_graph_iframe(mygraph), f"Merged '{node1}' and '{node2}' into '{new_node}'.{autosave}", *updates
 
 
-def update_node_attributes(
-    node_id: str,
-    new_label: str,
-    new_type: str,
-    new_desc: str,
-    new_source: str,
-    active_folder: str,
-) -> Tuple[str, str, str, Any, Any, Any]:
+def update_node_attributes(node_id: str, new_label: str, new_type: str, new_desc: str, new_source: str, active_folder: str) -> Tuple[str, str, Any, Any, Any]:
     global mygraph
+    updates = update_dropdowns()
 
     if not node_id:
-        updates = update_dropdowns()
-        return render_graph_iframe(mygraph), generate_legend_html(mygraph), "Select a node to update.", *updates
+        return render_graph_iframe(mygraph), "Select a node to update.", *updates
     if node_id not in mygraph:
-        updates = update_dropdowns()
-        return render_graph_iframe(mygraph), generate_legend_html(mygraph), f"Node '{node_id}' was not found in the current graph.", *updates
+        return render_graph_iframe(mygraph), f"Node '{node_id}' was not found in the current graph.", *updates
 
     if new_label:
         mygraph.nodes[node_id]["label"] = new_label
@@ -378,20 +440,13 @@ def update_node_attributes(
     if new_source:
         mygraph.nodes[node_id]["source"] = new_source
 
-    autosave = ""
     saved_path = _save_graph_pickle(active_folder, mygraph)
-    if saved_path is not None:
-        autosave = f" Auto-saved to {saved_path}."
-
+    autosave = f" Auto-saved to {saved_path}." if saved_path else ""
     updates = update_dropdowns()
-    return render_graph_iframe(mygraph), generate_legend_html(mygraph), f"Updated node '{node_id}'.{autosave}", *updates
+    return render_graph_iframe(mygraph), f"Updated node '{node_id}'.{autosave}", *updates
 
 
-async def create_pathrag_response(
-    question: str,
-    chat_history: List[dict],
-    active_folder: str,
-) -> Tuple[str, List[dict], str]:
+async def create_pathrag_response(question: str, chat_history: List[dict], active_folder: str) -> Tuple[str, List[dict], str]:
     if not active_folder:
         chat_history = list(chat_history or [])
         chat_history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
@@ -403,25 +458,19 @@ async def create_pathrag_response(
         rag = _get_pathrag(active_folder)
         result = await rag.aretrieve(question, conversation_history=_history_to_turns(history[:-1]))
         history.append({"role": "assistant", "content": result.answer})
-
         sources = []
         for index, chunk in enumerate(result.chunk_matches, start=1):
             head = chunk.filename or chunk.document_id or "(unknown doc)"
             sources.append(f"{index}. {head} (score={chunk.score:.3f})")
             sources.append(chunk.text)
             sources.append("-" * 46)
-
         return "", history, "\n".join(sources)
     except Exception as exc:
         history.append({"role": "assistant", "content": f"PathRAG error: {exc}"})
         return "", history, f"PathRAG error: {exc}"
 
 
-async def create_lightrag_response(
-    question: str,
-    chat_history: List[dict],
-    active_folder: str,
-) -> Tuple[str, List[dict], str]:
+async def create_lightrag_response(question: str, chat_history: List[dict], active_folder: str) -> Tuple[str, List[dict], str]:
     if not active_folder:
         chat_history = list(chat_history or [])
         chat_history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
@@ -433,7 +482,6 @@ async def create_lightrag_response(
         rag = _get_lightrag(active_folder)
         result = await rag.aretrieve(question, conversation_history=_history_to_turns(history[:-1]))
         history.append({"role": "assistant", "content": result.answer})
-
         sources = []
         for index, chunk in enumerate(result.all_chunks, start=1):
             source_type = chunk.get("source_type", "unknown")
@@ -443,7 +491,6 @@ async def create_lightrag_response(
             sources.append(line)
             sources.append(chunk.get("text", ""))
             sources.append("-" * 46)
-
         return "", history, "\n".join(sources)
     except Exception as exc:
         history.append({"role": "assistant", "content": f"LightRAG error: {exc}"})
@@ -467,28 +514,23 @@ with gr.Blocks() as demo:
                     pathrag_chatbot = gr.Chatbot(type="messages", label="PathRAG Chat History", height=420)
                     pathrag_sources = gr.Textbox(label="PathRAG sources", interactive=False, lines=14)
                     with gr.Row():
-                        pathrag_msg_input = gr.Textbox(show_label=False, placeholder="Ask a question about the active project...")
+                        pathrag_msg_input = gr.Textbox(show_label=False, placeholder="Ask a question about the uploaded documents...")
                         pathrag_clear_btn = gr.ClearButton(
                             components=[pathrag_msg_input, pathrag_chatbot, pathrag_sources],
                             value="Clear conversation",
                         )
-
                 with gr.Tab("LightRAG"):
                     lightrag_chatbot = gr.Chatbot(type="messages", label="LightRAG Chat History", height=420)
                     lightrag_sources = gr.Textbox(label="LightRAG sources", interactive=False, lines=14)
                     with gr.Row():
-                        lightrag_msg_input = gr.Textbox(show_label=False, placeholder="Ask a question about the active project...")
+                        lightrag_msg_input = gr.Textbox(show_label=False, placeholder="Ask a question about the uploaded documents...")
                         lightrag_clear_btn = gr.ClearButton(
                             components=[lightrag_msg_input, lightrag_chatbot, lightrag_sources],
                             value="Clear conversation",
                         )
 
         with gr.Tab("Knowledge Graph"):
-            with gr.Row():
-                with gr.Column(scale=9):
-                    graph_html = gr.HTML(render_graph_iframe(mygraph))
-                with gr.Column(scale=1):
-                    legend_html = gr.HTML(generate_legend_html(mygraph))
+            graph_html = gr.HTML(render_graph_iframe(mygraph))
             with gr.Row():
                 save_pickle_btn = gr.Button(value="Save Working Graph", variant="primary")
                 load_pickle_btn = gr.Button(value="Load Saved Graph")
@@ -508,33 +550,24 @@ with gr.Blocks() as demo:
     go_btn.click(
         fn=handle_ingestion,
         inputs=[folder_path_input],
-        outputs=[graph_html, legend_html, status_messages, active_folder, m1, m2, edit_node_dropdown],
+        outputs=[graph_html, status_messages, active_folder, m1, m2, edit_node_dropdown],
     )
-
-    save_pickle_btn.click(
-        fn=save_current_graph,
-        inputs=[active_folder],
-        outputs=[status_messages],
-    )
-
+    save_pickle_btn.click(fn=save_current_graph, inputs=[active_folder], outputs=[status_messages])
     load_pickle_btn.click(
         fn=load_saved_graph,
         inputs=[active_folder],
-        outputs=[graph_html, legend_html, status_messages, m1, m2, edit_node_dropdown],
+        outputs=[graph_html, status_messages, m1, m2, edit_node_dropdown],
     )
-
     updatenode_btn.click(
         fn=update_node_attributes,
         inputs=[edit_node_dropdown, edit_label, edit_type, edit_desc, edit_source, active_folder],
-        outputs=[graph_html, legend_html, status_messages, m1, m2, edit_node_dropdown],
+        outputs=[graph_html, status_messages, m1, m2, edit_node_dropdown],
     )
-
     mergenodes_btn.click(
         fn=merge_nodes,
         inputs=[m1, m2, active_folder],
-        outputs=[graph_html, legend_html, status_messages, m1, m2, edit_node_dropdown],
+        outputs=[graph_html, status_messages, m1, m2, edit_node_dropdown],
     )
-
     pathrag_msg_input.submit(
         fn=create_pathrag_response,
         inputs=[pathrag_msg_input, pathrag_chatbot, active_folder],
@@ -545,24 +578,10 @@ with gr.Blocks() as demo:
         inputs=[lightrag_msg_input, lightrag_chatbot, active_folder],
         outputs=[lightrag_msg_input, lightrag_chatbot, lightrag_sources],
     )
+    pathrag_clear_btn.click(fn=lambda: [None, None, None], inputs=[], outputs=[pathrag_msg_input, pathrag_chatbot, pathrag_sources], queue=False)
+    lightrag_clear_btn.click(fn=lambda: [None, None, None], inputs=[], outputs=[lightrag_msg_input, lightrag_chatbot, lightrag_sources], queue=False)
 
-    pathrag_clear_btn.click(
-        fn=lambda: [None, None, None],
-        inputs=[],
-        outputs=[pathrag_msg_input, pathrag_chatbot, pathrag_sources],
-        queue=False,
-    )
-    lightrag_clear_btn.click(
-        fn=lambda: [None, None, None],
-        inputs=[],
-        outputs=[lightrag_msg_input, lightrag_chatbot, lightrag_sources],
-        queue=False,
-    )
-
-    demo.load(
-        fn=update_dropdowns,
-        outputs=[m1, m2, edit_node_dropdown],
-    )
+    demo.load(fn=update_dropdowns, outputs=[m1, m2, edit_node_dropdown])
 
 
 if __name__ == "__main__":

@@ -78,6 +78,8 @@ config.py
 *.sqlite3
 storage/
 logs/
+docs/
+benchmark_all/
 *.log
 flashrank_model/
 

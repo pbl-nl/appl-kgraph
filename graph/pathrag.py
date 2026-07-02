@@ -21,7 +21,7 @@ from prompts import PROMPTS
 from logging_utils import configure_file_logger
 from graph_pickle import load_or_build_graph_snapshot
 from project_paths import ProjectPaths
-from query_logging import write_query_log
+from query_logging import write_audit_log
 
 
 LOGGER = logging.getLogger("PathRAG")
@@ -91,8 +91,8 @@ def set_logger(log_file: Path) -> None:
     configure_file_logger(
         "PathRAG",
         log_file=log_file,
-        level=settings.logging.retrieval_level,
-        enabled=settings.logging.retrieval_enabled,
+        level=settings.logging.internal_log_level,
+        enabled=settings.logging.internal_logging_enabled,
     )
 
 
@@ -434,16 +434,6 @@ class StorageAdapter:
     # ------------------------------------------------------------------
     # Vector queries
     # ------------------------------------------------------------------
-    @staticmethod
-    def _as_list(value: Any) -> List[Any]:
-        if value is None:
-            return []
-        if isinstance(value, dict):
-            return [value]
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            return list(value)
-        return [value]
-
     def query_entities(self, text: str, limit: int = 5) -> List[EntityMatch]:
         """Query entity vector index and return EntityMatch objects."""
         results = self._storage.search_entities(text=text, n_results=limit) or []
@@ -921,8 +911,8 @@ class PathRAG:
             relation_matches=relation_matches,
             chunk_matches=chunk_matches,
         )
-        if settings.logging.qa_enabled:
-            write_query_log(
+        if settings.logging.audit_enabled:
+            write_audit_log(
                 project_paths=self._project_paths,
                 retriever_name="pathrag",
                 payload={

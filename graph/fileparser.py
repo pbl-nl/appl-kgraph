@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import fitz
+import logging
 import time
 import mimetypes
 from pathlib import Path
@@ -12,6 +13,9 @@ from langchain_community.document_loaders import TextLoader
 from settings import VALID_EXTENSIONS
 import utils as ut
 import settings
+
+LOGGER = logging.getLogger("appl_kgraph.fileparser")
+
 
 class FileParser:
     """
@@ -74,7 +78,7 @@ class FileParser:
                 pages, file_metadata = self._parse_docx_file(filepath)
         #if any error happens return none
         except Exception as e:
-            print(f"Error parsing file {filepath}: {e}")
+            LOGGER.warning("Error parsing file %s: %s", filepath, e)
             return [], {}
 
         # Merge file-specific metadata
@@ -110,7 +114,7 @@ class FileParser:
             loader = BSHTMLLoader(filepath, bs_kwargs=bs_kwargs)
         except Exception:
             # Fallback to default parser if lxml not available
-            print("lxml parser not available, falling back to default HTML parser")
+            LOGGER.warning("lxml parser not available, falling back to default HTML parser")
             loader = BSHTMLLoader(filepath, open_encoding='utf-8')
         data = loader.load()
         raw_text = data[0].page_content.replace('\n', '')

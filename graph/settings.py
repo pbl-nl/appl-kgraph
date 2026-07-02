@@ -85,26 +85,26 @@ class StoragePaths:
 class ProjectSettings:
     artifacts_dirname: str = ".appl-kgraph"
     storage_dirname: str = "storage"
+    raw_documents_dirname: str = "raw_documents"
     logs_dirname: str = "logs"
-    qa_logs_dirname: str = "qa"
-    audits_dirname: str = "audits"
-    extraction_audits_dirname: str = "extraction"
+    audit_logs_dirname: str = "audit"
+    diagnostics_dirname: str = "diagnostics"
+    extraction_diagnostics_dirname: str = "extraction"
 
 
 @dataclass(frozen=True)
 class ExtractionSettings:
     use_chunk_language: bool = True
     detect_chunk_language: bool = False
-    audit_second_pass_enabled: bool = False
+    validation_second_pass_enabled: bool = False
 
 
 @dataclass(frozen=True)
 class LoggingSettings:
-    ingestion_enabled: bool = True
-    ingestion_level: str = "INFO"
-    retrieval_enabled: bool = True
-    retrieval_level: str = "INFO"
-    qa_enabled: bool = True
+    audit_enabled: bool = True
+    verbosity_enabled: bool = True
+    internal_logging_enabled: bool = True
+    internal_log_level: str = "INFO"
 
 
 @dataclass(frozen=True)
@@ -136,6 +136,7 @@ class RetrievalSettings:
     path_window_tokens: int = 512
     light_mode: str = "mix"
     response_type: str = "Single Paragraph"
+    top_k_chunk_per_entity: int = 3
     rerank_top_k: int = 20
     enable_rerank: bool = True
     rerank_cache_dir: str = "./flashrank_model"
@@ -265,11 +266,19 @@ def load_settings() -> Settings:
         artifacts_dirname=ut.env_str("PROJECT_ARTIFACTS_DIRNAME", ".appl-kgraph")
         or ".appl-kgraph",
         storage_dirname=ut.env_str("PROJECT_STORAGE_DIRNAME", "storage") or "storage",
+        raw_documents_dirname=ut.env_str(
+            "PROJECT_RAW_DOCUMENTS_DIRNAME",
+            "raw_documents",
+        )
+        or "raw_documents",
         logs_dirname=ut.env_str("PROJECT_LOGS_DIRNAME", "logs") or "logs",
-        qa_logs_dirname=ut.env_str("PROJECT_QA_LOGS_DIRNAME", "qa") or "qa",
-        audits_dirname=ut.env_str("PROJECT_AUDITS_DIRNAME", "audits") or "audits",
-        extraction_audits_dirname=ut.env_str(
-            "PROJECT_EXTRACTION_AUDITS_DIRNAME", "extraction"
+        audit_logs_dirname=ut.env_str("PROJECT_AUDIT_LOGS_DIRNAME", "audit")
+        or "audit",
+        diagnostics_dirname=ut.env_str("PROJECT_DIAGNOSTICS_DIRNAME", "diagnostics")
+        or "diagnostics",
+        extraction_diagnostics_dirname=ut.env_str(
+            "PROJECT_EXTRACTION_DIAGNOSTICS_DIRNAME",
+            "extraction",
         )
         or "extraction",
     )
@@ -277,18 +286,17 @@ def load_settings() -> Settings:
     extraction = ExtractionSettings(
         use_chunk_language=ut.env_bool("EXTRACTION_USE_CHUNK_LANGUAGE", True),
         detect_chunk_language=ut.env_bool("EXTRACTION_DETECT_CHUNK_LANGUAGE", False),
-        audit_second_pass_enabled=ut.env_bool(
-            "EXTRACTION_AUDIT_SECOND_PASS_ENABLED",
+        validation_second_pass_enabled=ut.env_bool(
+            "EXTRACTION_VALIDATION_SECOND_PASS_ENABLED",
             False,
         ),
     )
 
     logging_settings = LoggingSettings(
-        ingestion_enabled=ut.env_bool("INGESTION_LOG_ENABLED", True),
-        ingestion_level=ut.env_str("INGESTION_LOG_LEVEL", "INFO") or "INFO",
-        retrieval_enabled=ut.env_bool("RETRIEVAL_LOG_ENABLED", True),
-        retrieval_level=ut.env_str("RETRIEVAL_LOG_LEVEL", "INFO") or "INFO",
-        qa_enabled=ut.env_bool("QA_LOG_ENABLED", True),
+        audit_enabled=ut.env_bool("AUDIT_ENABLED", True),
+        verbosity_enabled=ut.env_bool("VERBOSITY_ENABLED", True),
+        internal_logging_enabled=ut.env_bool("INTERNAL_LOGGING_ENABLED", True),
+        internal_log_level=ut.env_str("INTERNAL_LOG_LEVEL", "INFO") or "INFO",
     )
 
     retrieval = RetrievalSettings(
@@ -327,6 +335,7 @@ def load_settings() -> Settings:
         light_mode=ut.env_str("RETRIEVAL_LIGHT_MODE", "mix") or "mix",
         response_type=ut.env_str("RETRIEVAL_RESPONSE_TYPE", "Single Paragraph")
         or "Single Paragraph",
+        top_k_chunk_per_entity=ut.env_int("RETRIEVAL_TOP_K_CHUNK_PER_ENTITY", 3),
         enable_rerank=ut.env_bool("RETRIEVAL_ENABLE_RERANK", True),
         rerank_top_k=ut.env_int("RETRIEVAL_RERANK_TOP_K", 20),
         rerank_cache_dir=ut.env_str(

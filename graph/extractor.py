@@ -41,14 +41,14 @@ def build_entity_relation_prompt(
     return PROMPTS["entity_extraction"].format(**ctx)
 
 
-def build_entity_audit_prompt(
+def build_entity_validation_prompt(
     text: str,
     *,
     initial_extraction: str,
     language: Optional[str] = None,
     entity_types: Optional[Iterable[str]] = None,
 ) -> str:
-    return PROMPTS["entity_extraction_audit"].format(
+    return PROMPTS["entity_extraction_validation"].format(
         input_text=text,
         initial_extraction=initial_extraction,
         language=normalize_language_name(language, settings.prompts.default_language),
@@ -253,7 +253,7 @@ def _run_cached_prompts(
     return [output or "" for output in raw_outputs]
 
 
-def _parse_audit_output(raw: str) -> Dict[str, Any]:
+def _parse_validation_output(raw: str) -> Dict[str, Any]:
     text = raw.strip()
     if not text:
         return {"missing_entities": [], "missing_relationships": [], "summary": ""}
@@ -295,14 +295,18 @@ def extract_from_chunks(
     entity_types: Optional[Iterable[str]] = None,
     client: Optional[Chat] = None,
     storage: Optional[Storage] = None,
-    audit_enabled: Optional[bool] = None,
+    validation_enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    '''Extract entities and relationships from the provided chunks using LLM prompts, with optional caching and auditing.'''
+    '''Extract entities and relationships from chunks with optional cached validation.'''
     chat = client or Chat.singleton()
     active_storage = _ensure_storage(storage)
     chunk_list = list(chunks)
     resolved_entity_types = list(entity_types or _default_entity_types())
-    do_audit = settings.extraction.audit_second_pass_enabled if audit_enabled is None else audit_enabled
+    do_validation = (
+        settings.extraction.validation_second_pass_enabled
+        if validation_enabled is None
+        else validation_enabled
+    )
 
     chunk_languages = [
         _resolve_chunk_language(chunk, explicit_language=language)
@@ -365,10 +369,10 @@ def extract_from_chunks(
             }
         )
 
-    audits: List[Dict[str, Any]] = []
-    if do_audit and chunk_results:
-        audit_prompts = []
-        audit_hash_inputs = []
+    validation_results: List[Dict[str, Any]] = []
+    if do_validation and chunk_results:
+        validation_prompts = []
+        validation_hash_inputs = []
         for chunk, chunk_result, chunk_language in zip(chunk_list, chunk_results, chunk_languages):
             extraction_snapshot = json.dumps(
                 {
@@ -378,33 +382,33 @@ def extract_from_chunks(
                 },
                 ensure_ascii=False,
             )
-            audit_prompts.append(
-                build_entity_audit_prompt(
+            validation_prompts.append(
+                build_entity_validation_prompt(
                     _get_chunk_text(chunk),
                     initial_extraction=extraction_snapshot,
                     language=chunk_language,
                     entity_types=resolved_entity_types,
                 )
             )
-            audit_hash_inputs.append(f"{_get_chunk_text(chunk)}\n{extraction_snapshot}")
+            validation_hash_inputs.append(f"{_get_chunk_text(chunk)}\n{extraction_snapshot}")
 
-        audit_outputs = _run_cached_prompts(
+        validation_outputs = _run_cached_prompts(
             chat=chat,
             storage=active_storage,
-            prompts=audit_prompts,
-            text_hash_inputs=audit_hash_inputs,
-            system_prompt="You audit extraction completeness. Return JSON only.",
+            prompts=validation_prompts,
+            text_hash_inputs=validation_hash_inputs,
+            system_prompt="You validate extraction completeness. Return JSON only.",
         )
 
-        for chunk_result, raw_audit in zip(chunk_results, audit_outputs):
-            parsed_audit = _parse_audit_output(raw_audit)
-            audits.append(
+        for chunk_result, raw_validation in zip(chunk_results, validation_outputs):
+            parsed_validation = _parse_validation_output(raw_validation)
+            validation_results.append(
                 {
                     "chunk_uuid": chunk_result["chunk_uuid"],
                     "filepath": chunk_result["filepath"],
                     "language": chunk_result["language"],
-                    **parsed_audit,
-                    "raw_output": raw_audit,
+                    **parsed_validation,
+                    "raw_output": raw_validation,
                 }
             )
 
@@ -413,7 +417,7 @@ def extract_from_chunks(
         "relationships": all_relationships,
         "content_keywords": sorted(set(all_keywords)),
         "chunk_results": chunk_results,
-        "audits": audits,
+        "validation_results": validation_results,
     }
 
 
@@ -428,7 +432,7 @@ def extract_entities_relations_for_chunk(
         language=language,
         entity_types=entity_types,
         client=client,
-        audit_enabled=False,
+        validation_enabled=False,
     )
     return result["entities"], result["relationships"], result["content_keywords"]
 
@@ -494,7 +498,7 @@ if __name__ == "__main__":
         language=explicit_language,
         entity_types=entity_types,
         client=Chat.singleton(),
-        audit_enabled=settings.extraction.audit_second_pass_enabled,
+        validation_enabled=settings.extraction.validation_second_pass_enabled,
     )
     _print_summary(result)
     print("\n\nJSON Output:")

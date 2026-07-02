@@ -17,6 +17,7 @@ from pyvis.network import Network
 from ingestion import ingest_paths
 from lightrag import LightRAG
 from pathrag import PathRAG, StorageAdapter as PathStorageAdapter
+from settings import settings
 from graph_pickle import load_graph_from_pickle, save_graph_to_pickle
 from project_paths import (
     ProjectPaths,
@@ -269,7 +270,7 @@ def render_graph_iframe(graph: nx.Graph, height_px: int = _GRAPH_PANEL_HEIGHT_PX
         )
         node_doc_line = f"doc(s) = {node_doc_names}" if node_doc_names else ""
         node_label = str(data.get("label", node))
-        node_description = f"description = {textwrap.fill(data.get("description", ""), width=80)}"
+        node_description = f"description = {textwrap.fill(data.get('description', ''), width=80)}"
         node_title = f"{node_label}\n{node_doc_line}\n{node_description}"
         node_type = data.get("type", "unknown")
         node_color = type_colors.get(node_type, "#0EA5E9")
@@ -410,11 +411,15 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any
         )
         return
 
-    progress_messages = [
-        f"Preparing ingestion for {documents_root}",
-        f"Discovered {len(paths)} supported files",
-    ]
-    yield _ingestion_payload(mygraph, "\n".join(progress_messages), str(documents_root))
+    progress_messages: List[str] = []
+    if settings.logging.verbosity_enabled:
+        progress_messages = [
+            f"Preparing ingestion for {documents_root}",
+            f"Discovered {len(paths)} supported files",
+        ]
+        yield _ingestion_payload(mygraph, "\n".join(progress_messages), str(documents_root))
+    else:
+        yield _ingestion_payload(mygraph, "Ingestion running.", str(documents_root))
 
     progress_queue: queue.Queue[str] = queue.Queue()
     outcome: dict[str, Any] = {}
@@ -445,8 +450,9 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any
             continue
         if message == "__DONE__":
             break
-        progress_messages.append(message)
-        yield _ingestion_payload(mygraph, "\n".join(progress_messages[-50:]), str(documents_root))
+        if settings.logging.verbosity_enabled:
+            progress_messages.append(message)
+            yield _ingestion_payload(mygraph, "\n".join(progress_messages[-50:]), str(documents_root))
 
     if "exception" in error:
         progress_messages.append(f"Error: {error['exception']}")
@@ -476,9 +482,10 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any
         f"Entities: {summary['entity_count']}\n"
         f"Relations: {summary['relation_count']}"
         f"\nRetrieval snapshot: {project_paths.retrieval_graph_pickle_file}"
-        f"{pickle_note}\n\n"
-        f"{chr(10).join(progress_messages[-20:])}"
+        f"{pickle_note}"
     )
+    if settings.logging.verbosity_enabled and progress_messages:
+        status = f"{status}\n\n{chr(10).join(progress_messages[-20:])}"
     yield _ingestion_payload(mygraph, status, str(documents_root))
 
 

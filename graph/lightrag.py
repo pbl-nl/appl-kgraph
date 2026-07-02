@@ -21,7 +21,7 @@ from prompts import PROMPTS
 from logging_utils import configure_file_logger
 from graph_pickle import load_or_build_graph_snapshot
 from project_paths import ProjectPaths
-from query_logging import write_query_log
+from query_logging import write_audit_log
 
 
 LOGGER = logging.getLogger("LightRAG")
@@ -81,8 +81,8 @@ def set_logger(log_file: Path) -> None:
     configure_file_logger(
         "LightRAG",
         log_file=log_file,
-        level=settings.logging.retrieval_level,
-        enabled=settings.logging.retrieval_enabled,
+        level=settings.logging.internal_log_level,
+        enabled=settings.logging.internal_logging_enabled,
     )
 
 
@@ -821,7 +821,11 @@ def build_context(
             retrieved_docs=deduplicated_chunks,
             top_n=rerank_top_k,
         )
-        print(f"Reranked chunks: kept {len(deduplicated_chunk_ids)} chunks after reranking, it was {len(deduplicated_chunks)} before reranking")
+        LOGGER.info(
+            "Reranked chunks: kept %d chunks after reranking, it was %d before reranking",
+            len(deduplicated_chunk_ids),
+            len(deduplicated_chunks),
+        )
         deduplicated_chunks = [deduplicated_chunks[idx] for idx in deduplicated_chunk_ids]
 
     # Apply chunk_top_k limit if needed
@@ -1006,7 +1010,7 @@ class LightRAG:
             top_k_entities=settings.retrieval.entity_top_k,
             top_k_relations=settings.retrieval.relation_top_k,
             top_k_chunks=settings.retrieval.chunk_top_k,
-            top_k_chunk_per_entity=3,  # configurable
+            top_k_chunk_per_entity=settings.retrieval.top_k_chunk_per_entity,
         )
 
         # Format context for prompt
@@ -1033,8 +1037,8 @@ class LightRAG:
             hl_keywords=hl_keywords,
             ll_keywords=ll_keywords,
         )
-        if settings.logging.qa_enabled:
-            write_query_log(
+        if settings.logging.audit_enabled:
+            write_audit_log(
                 project_paths=self._project_paths,
                 retriever_name="lightrag",
                 payload={
@@ -1050,6 +1054,7 @@ class LightRAG:
                         "entity_top_k": settings.retrieval.entity_top_k,
                         "relation_top_k": settings.retrieval.relation_top_k,
                         "chunk_top_k": settings.retrieval.chunk_top_k,
+                        "top_k_chunk_per_entity": settings.retrieval.top_k_chunk_per_entity,
                     },
                     "model": _retrieval_model_metadata(),
                     "high_level_keywords": hl_keywords,

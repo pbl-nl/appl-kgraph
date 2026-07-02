@@ -2,11 +2,11 @@
 DocBench-style evaluation of PathRAG and LightRAG.
 
 Usage:
-    python evaluate.py <benchmark_root> [--retriever {pathrag,lightrag,both}] [--output results.jsonl]
+    python evaluate.py <benchmark_root> [--retriever {pathrag,lightrag,both}]
 
-benchmark_root must contain numbered subfolders (1, 2, ..., 10), each with:
-  - one PDF file  (the document to query)
-  - one JSONL file (questions in DocBench format)
+benchmark_root must contain numbered subfolders, each with:
+  - one PDF file, the document to query
+  - one JSONL file, questions in DocBench format
 """
 from __future__ import annotations
 
@@ -21,9 +21,11 @@ from typing import List, Optional
 
 from ingestion import ingest_paths
 from lightrag import LightRAG
+from llm import Chat
 from pathrag import PathRAG
 from project_paths import resolve_project_paths
-from llm import Chat
+from query_logging import build_audit_settings_snapshot
+from settings import settings
 
 
 _JUDGE_SYSTEM = (
@@ -40,9 +42,16 @@ Generated answer: {generated}
 Is the generated answer correct? Reply with only "yes" or "no"."""
 
 
-def _log(log_path: Path, entry: dict) -> None:
+def _emit(message: str, *, force: bool = False) -> None:
+    if force or settings.logging.verbosity_enabled:
+        print(message)
+
+
+def _write_audit_jsonl(log_path: Path, entry: dict) -> None:
+    if not settings.logging.audit_enabled:
+        return
     entry["ts"] = datetime.datetime.now().isoformat()
-    with open(log_path, "a", encoding="utf-8") as fh:
+    with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
@@ -65,31 +74,37 @@ def _llm_judge(
         verdict = chat.generate(prompt, system=_JUDGE_SYSTEM, temperature=0.0, max_tokens=4)
         result = verdict.strip().lower().startswith("y")
     except Exception as exc:
-        print(f"    [judge error] {exc}")
-        _log(log_path, {
+        _emit(f"    [judge error] {exc}", force=True)
+        _write_audit_jsonl(
+            log_path,
+            {
+                "call": "judge",
+                "subfolder": subfolder,
+                "question_index": question_index,
+                "question": question,
+                "reference": reference,
+                "generated": generated,
+                "response": None,
+                "verdict": None,
+                "error": str(exc),
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+            },
+        )
+        return None
+    _write_audit_jsonl(
+        log_path,
+        {
             "call": "judge",
             "subfolder": subfolder,
             "question_index": question_index,
             "question": question,
             "reference": reference,
             "generated": generated,
-            "response": None,
-            "verdict": None,
-            "error": str(exc),
+            "response": verdict.strip(),
+            "verdict": result,
             "duration_ms": int((time.monotonic() - t0) * 1000),
-        })
-        return None
-    _log(log_path, {
-        "call": "judge",
-        "subfolder": subfolder,
-        "question_index": question_index,
-        "question": question,
-        "reference": reference,
-        "generated": generated,
-        "response": verdict.strip(),
-        "verdict": result,
-        "duration_ms": int((time.monotonic() - t0) * 1000),
-    })
+        },
+    )
     return result
 
 
@@ -100,7 +115,7 @@ def _find_file(folder: Path, suffix: str) -> Optional[Path]:
 
 def _load_questions(jsonl_path: Path) -> List[dict]:
     rows = []
-    with open(jsonl_path, encoding="utf-8") as fh:
+    with jsonl_path.open(encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if line:
@@ -118,13 +133,13 @@ async def _run_subfolder(
     jsonl = _find_file(subfolder, ".jsonl")
 
     if pdf is None:
-        print(f"  [{subfolder.name}] No PDF found — skipping.")
+        _emit(f"  [{subfolder.name}] No PDF found - skipping.")
         return []
     if jsonl is None:
-        print(f"  [{subfolder.name}] No JSONL found — skipping.")
+        _emit(f"  [{subfolder.name}] No JSONL found - skipping.")
         return []
 
-    print(f"\n[{subfolder.name}] Ingesting {pdf.name} ...")
+    _emit(f"\n[{subfolder.name}] Ingesting {pdf.name} ...")
     ingest_paths([pdf], documents_root=subfolder)
 
     project_paths = resolve_project_paths(subfolder)
@@ -132,7 +147,7 @@ async def _run_subfolder(
     lightrag = LightRAG(project_paths=project_paths, system_prompt="") if retriever in ("lightrag", "both") else None
 
     questions = _load_questions(jsonl)
-    print(f"[{subfolder.name}] {len(questions)} questions ...")
+    _emit(f"[{subfolder.name}] {len(questions)} questions ...")
 
     results: List[dict] = []
     for idx, qa in enumerate(questions, start=1):
@@ -147,7 +162,7 @@ async def _run_subfolder(
             "evidence": qa.get("evidence", ""),
         }
 
-        print(f"  Q{idx}/{len(questions)}: {question[:70]}...")
+        _emit(f"  Q{idx}/{len(questions)}: {question[:70]}...")
 
         if pathrag is not None:
             t0 = time.monotonic()
@@ -158,22 +173,30 @@ async def _run_subfolder(
             except Exception as exc:
                 row["pathrag_answer"] = f"ERROR: {exc}"
                 error = str(exc)
-            _log(log_path, {
-                "call": "retrieval",
-                "retriever": "pathrag",
-                "subfolder": subfolder.name,
-                "question_index": idx,
-                "question": question,
-                "answer": row["pathrag_answer"],
-                "error": error,
-                "duration_ms": int((time.monotonic() - t0) * 1000),
-            })
+            _write_audit_jsonl(
+                log_path,
+                {
+                    "call": "retrieval",
+                    "retriever": "pathrag",
+                    "subfolder": subfolder.name,
+                    "question_index": idx,
+                    "question": question,
+                    "answer": row["pathrag_answer"],
+                    "error": error,
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
             row["pathrag_correct"] = _llm_judge(
-                chat, question, reference, row["pathrag_answer"],
-                log_path, subfolder.name, idx,
+                chat,
+                question,
+                reference,
+                row["pathrag_answer"],
+                log_path,
+                subfolder.name,
+                idx,
             )
             mark = "ok" if row["pathrag_correct"] else ("wrong" if row["pathrag_correct"] is False else "judge-err")
-            print(f"    PathRAG  → {mark}")
+            _emit(f"    PathRAG  -> {mark}")
 
         if lightrag is not None:
             t0 = time.monotonic()
@@ -184,22 +207,30 @@ async def _run_subfolder(
             except Exception as exc:
                 row["lightrag_answer"] = f"ERROR: {exc}"
                 error = str(exc)
-            _log(log_path, {
-                "call": "retrieval",
-                "retriever": "lightrag",
-                "subfolder": subfolder.name,
-                "question_index": idx,
-                "question": question,
-                "answer": row["lightrag_answer"],
-                "error": error,
-                "duration_ms": int((time.monotonic() - t0) * 1000),
-            })
+            _write_audit_jsonl(
+                log_path,
+                {
+                    "call": "retrieval",
+                    "retriever": "lightrag",
+                    "subfolder": subfolder.name,
+                    "question_index": idx,
+                    "question": question,
+                    "answer": row["lightrag_answer"],
+                    "error": error,
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
             row["lightrag_correct"] = _llm_judge(
-                chat, question, reference, row["lightrag_answer"],
-                log_path, subfolder.name, idx,
+                chat,
+                question,
+                reference,
+                row["lightrag_answer"],
+                log_path,
+                subfolder.name,
+                idx,
             )
             mark = "ok" if row["lightrag_correct"] else ("wrong" if row["lightrag_correct"] is False else "judge-err")
-            print(f"    LightRAG → {mark}")
+            _emit(f"    LightRAG -> {mark}")
 
         results.append(row)
 
@@ -207,9 +238,9 @@ async def _run_subfolder(
 
 
 def _print_summary(rows: List[dict], retriever: str) -> None:
-    print("\n" + "=" * 60)
-    print("EVALUATION SUMMARY")
-    print("=" * 60)
+    _emit("\n" + "=" * 60, force=True)
+    _emit("EVALUATION SUMMARY", force=True)
+    _emit("=" * 60, force=True)
 
     retrievers = [r for r in ("pathrag", "lightrag") if retriever in (r, "both")]
     by_type: dict[str, dict[str, dict]] = {}
@@ -229,33 +260,31 @@ def _print_summary(rows: List[dict], retriever: str) -> None:
                     totals[r]["correct"] += 1
 
     for q_type, counts in sorted(by_type.items()):
-        print(f"\n  {q_type}")
+        _emit(f"\n  {q_type}", force=True)
         for r in retrievers:
             n = counts[r]["total"]
             if n:
                 pct = 100 * counts[r]["correct"] / n
-                print(f"    {r.upper():<10s}: {counts[r]['correct']}/{n}  ({pct:.1f}%)")
+                _emit(f"    {r.upper():<10s}: {counts[r]['correct']}/{n}  ({pct:.1f}%)", force=True)
 
-    print(f"\n  OVERALL")
+    _emit("\n  OVERALL", force=True)
     for r in retrievers:
         n = totals[r]["total"]
         if n:
             pct = 100 * totals[r]["correct"] / n
-            print(f"    {r.upper():<10s}: {totals[r]['correct']}/{n}  ({pct:.1f}%)")
+            _emit(f"    {r.upper():<10s}: {totals[r]['correct']}/{n}  ({pct:.1f}%)", force=True)
 
 
 async def _main_async(benchmark_root: Path, retriever: str) -> None:
-    import datetime
-    from settings import settings as app_settings
-
     input_dir = benchmark_root / "input"
     output_dir = benchmark_root / "output"
 
     if not input_dir.is_dir():
-        print(f"ERROR: input folder not found at {input_dir}")
+        _emit(f"ERROR: input folder not found at {input_dir}", force=True)
         sys.exit(1)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if settings.logging.audit_enabled:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     results_path = output_dir / f"eval_results_{timestamp}.jsonl"
@@ -267,7 +296,7 @@ async def _main_async(benchmark_root: Path, retriever: str) -> None:
         key=lambda d: d.name,
     )
     if not subfolders:
-        print(f"No subfolders found in {input_dir}")
+        _emit(f"No subfolders found in {input_dir}", force=True)
         sys.exit(1)
 
     run_settings = {
@@ -277,30 +306,21 @@ async def _main_async(benchmark_root: Path, retriever: str) -> None:
         "output_dir": str(output_dir),
         "retriever": retriever,
         "subfolders": [d.name for d in subfolders],
-        "llm_provider": app_settings.provider.provider,
-        "llm_model": (
-            app_settings.provider.openai_llm_model
-            if app_settings.provider.provider == "openai"
-            else app_settings.provider.azure_llm_deployment
-        ),
-        "retrieval": {
-            "entity_top_k": app_settings.retrieval.entity_top_k,
-            "relation_top_k": app_settings.retrieval.relation_top_k,
-            "chunk_top_k": app_settings.retrieval.chunk_top_k,
-            "light_mode": app_settings.retrieval.light_mode,
-            "path_max_depth": app_settings.retrieval.path_max_depth,
-            "enable_rerank": app_settings.retrieval.enable_rerank,
-        },
+        "settings": build_audit_settings_snapshot(),
     }
 
-    settings_path.write_text(json.dumps(run_settings, indent=2, ensure_ascii=False), encoding="utf-8")
+    if settings.logging.audit_enabled:
+        settings_path.write_text(json.dumps(run_settings, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"Input      : {input_dir}")
-    print(f"Output     : {results_path}")
-    print(f"LLM log    : {log_path}")
-    print(f"Settings   : {settings_path}")
-    print(f"Retriever  : {retriever}")
-    print(f"Subfolders : {[d.name for d in subfolders]}")
+    _emit(f"Input      : {input_dir}")
+    if settings.logging.audit_enabled:
+        _emit(f"Output     : {results_path}")
+        _emit(f"LLM log    : {log_path}")
+        _emit(f"Settings   : {settings_path}")
+    else:
+        _emit("Audit logs : disabled")
+    _emit(f"Retriever  : {retriever}")
+    _emit(f"Subfolders : {[d.name for d in subfolders]}")
 
     chat = Chat()
     all_rows: List[dict] = []
@@ -309,12 +329,15 @@ async def _main_async(benchmark_root: Path, retriever: str) -> None:
         rows = await _run_subfolder(subfolder, retriever, chat, log_path)
         all_rows.extend(rows)
 
-        # flush after each subfolder so partial results survive interruption
-        with open(results_path, "w", encoding="utf-8") as fh:
-            for row in all_rows:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if settings.logging.audit_enabled:
+            with results_path.open("w", encoding="utf-8") as fh:
+                for row in all_rows:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"\nResults written to {results_path}  ({len(all_rows)} rows)")
+    if settings.logging.audit_enabled:
+        _emit(f"\nResults written to {results_path}  ({len(all_rows)} rows)", force=True)
+    else:
+        _emit(f"\nAudit disabled; evaluated {len(all_rows)} rows without writing result files.", force=True)
     _print_summary(all_rows, retriever)
 
 
@@ -339,7 +362,7 @@ def main() -> None:
 
     benchmark_root = Path(args.benchmark_root).expanduser().resolve()
     if not benchmark_root.is_dir():
-        print(f"ERROR: {benchmark_root} is not a directory.")
+        _emit(f"ERROR: {benchmark_root} is not a directory.", force=True)
         sys.exit(1)
 
     asyncio.run(_main_async(benchmark_root, args.retriever))

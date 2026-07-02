@@ -9,6 +9,7 @@ from ingestion import ingest_paths
 from lightrag import LightRAG, RetrievalResult
 from pathrag import PathRAG, render_full_context
 from project_paths import list_document_paths, resolve_project_paths
+from settings import settings
 
 
 async def ask_with_pathrag(
@@ -24,9 +25,6 @@ async def ask_with_pathrag(
     print("Answer:\n", result.answer)
     if verbose:
         print(render_full_context(result))
-    elif result.context_windows:
-        for window in result.context_windows:
-            print(f"\n[{window.label}] score={window.score:.2f}\n{window.text}")
 
 
 async def ask_with_lightrag(
@@ -68,7 +66,7 @@ def main() -> None:
             ask_with_pathrag(
                 query,
                 documents_root=documents_root,
-                verbose=True,
+                verbose=settings.logging.verbosity_enabled,
                 conversation_history=conversation_history,
             )
         )
@@ -78,7 +76,7 @@ def main() -> None:
             ask_with_lightrag(
                 query,
                 documents_root=documents_root,
-                verbose=True,
+                verbose=settings.logging.verbosity_enabled,
                 history=conversation_history,
             )
         )

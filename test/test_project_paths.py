@@ -21,9 +21,14 @@ def test_resolve_project_paths_nests_artifacts_under_documents_root(tmp_path):
     assert project_paths.documents_root == documents_root.resolve()
     assert project_paths.project_root == documents_root.resolve() / ".appl-kgraph"
     assert Path(project_paths.storage.documents_db).parent == project_paths.storage_root
-    assert project_paths.qa_logs_dir.parent == project_paths.logs_dir
+    assert project_paths.raw_documents_dir.parent == project_paths.storage_root
+    assert project_paths.audit_logs_dir.parent == project_paths.logs_dir
+    assert project_paths.extraction_diagnostics_dir.parent == project_paths.diagnostics_dir
     assert project_paths.graph_pickle_file == project_paths.knowledge_graph_dir / "kg.pkl"
     assert project_paths.retrieval_graph_pickle_file == project_paths.knowledge_graph_dir / "kg_retrieval.pkl"
+    assert not hasattr(project_paths, "qa_logs_dir")
+    assert not hasattr(project_paths, "audits_dir")
+    assert not hasattr(project_paths, "extraction_audits_dir")
 
 
 def test_list_document_paths_excludes_project_artifacts(tmp_path):

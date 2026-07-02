@@ -28,8 +28,8 @@ import hashlib
 LOGGER = configure_file_logger(
     "appl_kgraph.ingestion",
     log_file=Path("ingestion.log"),
-    level=settings.logging.ingestion_level,
-    enabled=settings.logging.ingestion_enabled,
+    level=settings.logging.internal_log_level,
+    enabled=settings.logging.internal_logging_enabled,
 )
 
 #--------------------------------------------------
@@ -179,24 +179,31 @@ def _configure_ingestion_logger(project_paths: Optional[ProjectPaths]) -> None:
     configure_file_logger(
         "appl_kgraph.ingestion",
         log_file=log_file,
-        level=settings.logging.ingestion_level,
-        enabled=settings.logging.ingestion_enabled,
+        level=settings.logging.internal_log_level,
+        enabled=settings.logging.internal_logging_enabled,
     )
 
 
-def _write_extraction_audits(
+def _write_extraction_diagnostics(
     project_paths: Optional[ProjectPaths],
     filename: str,
-    audits: List[Dict[str, Any]],
+    validation_results: List[Dict[str, Any]],
 ) -> None:
-    if project_paths is None or not audits:
+    if (
+        project_paths is None
+        or not validation_results
+        or not settings.logging.internal_logging_enabled
+    ):
         return
     ensure_project_dirs(project_paths)
-    target = project_paths.extraction_audits_dir / f"{Path(filename).stem}.audit.json"
-    target.write_text(json.dumps(audits, ensure_ascii=False, indent=2), encoding="utf-8")
+    target = project_paths.extraction_diagnostics_dir / f"{Path(filename).stem}.validation.json"
+    target.write_text(
+        json.dumps(validation_results, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
-def _write_raw_text_audit(
+def _write_raw_document_snapshot(
     project_paths: Optional[ProjectPaths],
     *,
     filename: str,
@@ -216,7 +223,7 @@ def _write_raw_text_audit(
         "extracted_at": datetime.now(timezone.utc).isoformat(),
         "raw_text": raw_text,
     }
-    target = project_paths.extraction_audits_dir / f"{Path(filename).stem}.raw.json"
+    target = project_paths.raw_documents_dir / f"{Path(filename).name}.raw.json"
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -752,7 +759,6 @@ def ingest_paths(
     documents_root: Optional[Union[Path, str]] = None,
     project_paths: Optional[ProjectPaths] = None,
     storage_paths=None,
-    audit_enabled: Optional[bool] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -769,7 +775,7 @@ def ingest_paths(
     """
     def report(message: str) -> None:
         LOGGER.info(message)
-        if progress_callback is not None:
+        if progress_callback is not None and settings.logging.verbosity_enabled:
             progress_callback(message)
 
     active_project_paths = _resolve_runtime_project_paths(
@@ -862,7 +868,7 @@ def ingest_paths(
             "full_char_count": len(full_text),
         }
 
-        _write_raw_text_audit(
+        _write_raw_document_snapshot(
             project_paths=active_project_paths,
             filename=p.name,
             doc_meta=doc_meta,
@@ -890,7 +896,6 @@ def ingest_paths(
         res = extract_from_chunks(
             chunks,
             storage=storage,
-            audit_enabled=audit_enabled,
         )
         
         # Consolidate/merge entities (by (name,type)) and upsert those first
@@ -915,9 +920,10 @@ def ingest_paths(
             report(f"{step_prefix} - writing {len(edges)} relations")
             storage.upsert_edges(edges)                 # write schema
             all_relations.extend(edges)                 # collect for vector DB later
-        if res.get("audits"):
-            report(f"{step_prefix} - writing extraction audit")
-        _write_extraction_audits(active_project_paths, p.name, res.get("audits", []) or [])
+        validation_results = res.get("validation_results") or []
+        if validation_results:
+            report(f"{step_prefix} - writing extraction diagnostics")
+        _write_extraction_diagnostics(active_project_paths, p.name, validation_results)
         report(f"{step_prefix} - completed")
         processed_files += 1
 

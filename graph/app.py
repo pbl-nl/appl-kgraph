@@ -29,7 +29,8 @@ from project_paths import (
 mygraph = nx.Graph()
 _PATHRAG_CACHE: dict[str, PathRAG] = {}
 _LIGHTRAG_CACHE: dict[str, LightRAG] = {}
-_DOCS_ROOT = Path(__file__).resolve().parents[1] / "docs"
+_DOCS_ROOT_DIRNAME = settings.project.documents_root_dirname
+_DOCS_ROOT = Path(__file__).resolve().parents[1] / _DOCS_ROOT_DIRNAME
 _GRAPH_PANEL_HEIGHT_PX = 650
 _GRAPH_FILTER_TEXT = ""
 _GRAPH_FILTER_MODE = "contains"
@@ -171,7 +172,7 @@ def load_existing_graph(selected_docs_folder: str) -> Tuple[str, str, str, Any, 
         docs_subfolder_name = docs_relative.parts[0] if docs_relative.parts else selected_path.name
     except ValueError:
         docs_subfolder_name = selected_path.name
-    message = f"Loaded existing graph from docs/{docs_subfolder_name}"
+    message = f"Loaded existing graph from {_DOCS_ROOT_DIRNAME}/{docs_subfolder_name}"
     updates = update_dropdowns()
     return render_graph_for_ui(mygraph), message, selected_docs_folder, *updates
 
@@ -691,8 +692,8 @@ with gr.Blocks() as demo:
         with gr.Group(visible=False) as existing_graph_controls:
             existing_graph_dropdown = gr.Dropdown(
                 choices=[],
-                label="Existing graph in docs",
-                info="Scans docs/*/.appl-kgraph/knowledge_graph/kg.pkl",
+                label=f"Existing graph in {_DOCS_ROOT_DIRNAME}",
+                info=f"Scans {_DOCS_ROOT_DIRNAME}/*/.appl-kgraph/knowledge_graph/kg.pkl",
             )
             with gr.Row():
                 refresh_existing_btn = gr.Button(value="Refresh Graph List")

@@ -83,6 +83,7 @@ class StoragePaths:
 
 @dataclass(frozen=True)
 class ProjectSettings:
+    documents_root_dirname: str = "docs"
     artifacts_dirname: str = ".appl-kgraph"
     storage_dirname: str = "storage"
     raw_documents_dirname: str = "raw_documents"
@@ -263,6 +264,8 @@ def load_settings() -> Settings:
     )
 
     project = ProjectSettings(
+        documents_root_dirname=ut.env_str("PROJECT_DOCUMENTS_ROOT_DIRNAME", "docs")
+        or "docs",
         artifacts_dirname=ut.env_str("PROJECT_ARTIFACTS_DIRNAME", ".appl-kgraph")
         or ".appl-kgraph",
         storage_dirname=ut.env_str("PROJECT_STORAGE_DIRNAME", "storage") or "storage",

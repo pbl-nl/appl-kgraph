@@ -15,6 +15,7 @@ import networkx as nx
 from pyvis.network import Network
 
 from ingestion import ingest_paths
+from db_storage import DocumentsDB
 from lightrag import LightRAG
 from pathrag import PathRAG, StorageAdapter as PathStorageAdapter
 from settings import settings
@@ -128,13 +129,117 @@ def refresh_existing_graph_dropdown() -> Any:
     return gr.update(choices=choices, value=value)
 
 
-def update_source_mode(source_mode: str) -> Tuple[Any, Any, Any, str]:
+def _stored_document_names(folder_path: str) -> List[str]:
+    project_paths = _project_paths_for_folder(folder_path)
+    if project_paths is None:
+        return []
+
+    names: set[str] = set()
+    documents_db_path = Path(project_paths.storage.documents_db)
+    if documents_db_path.exists():
+        try:
+            rows = DocumentsDB(str(documents_db_path)).list_documents()
+            for row in rows:
+                filename = str(row.get("filename", "") or "").strip()
+                if filename:
+                    names.add(filename)
+        except Exception:
+            pass
+
+    if not names:
+        graph = _load_graph_from_pickle(folder_path)
+        for _, data in graph.nodes(data=True):
+            raw_filepaths = str(data.get("filepath", "") or "")
+            for raw_path in raw_filepaths.split("||"):
+                token = raw_path.strip()
+                if token:
+                    names.add(Path(token).name)
+
+    return sorted(names, key=str.lower)
+
+
+def _sidebar_ingested_files_for_folder(folder_path: str) -> str:
+    if not folder_path:
+        return ""
+
+    folder = Path(folder_path).expanduser().resolve()
+    if not folder.exists() or not folder.is_dir():
+        return f"Folder not found: {folder}"
+
+    current_files = _list_document_paths_direct(folder)
+    current_names = {path.name for path in current_files}
+    stored_names = set(_stored_document_names(str(folder)))
+    matching_names = sorted(current_names & stored_names, key=str.lower)
+
+    lines = [
+        f"Supported files found: {len(current_files)}",
+        f"Previously ingested from this folder: {len(matching_names)}",
+        "",
+    ]
+    if matching_names:
+        lines.extend(f"- {name}" for name in matching_names)
+    return "\n".join(lines)
+
+
+def _sidebar_ingested_files_for_graph(folder_path: str) -> str:
+    if not folder_path:
+        return ""
+
+    folder = Path(folder_path).expanduser().resolve()
+    doc_names = _stored_document_names(str(folder))
+    lines = [
+        f"Documents in this graph: {len(doc_names)}",
+        "",
+    ]
+    if doc_names:
+        lines.extend(f"- {name}" for name in doc_names)
+    return "\n".join(lines)
+
+
+def _sidebar_ingested_files(source_mode: str, folder_path: str, selected_docs_folder: str) -> str:
+    if source_mode == "Use Existing Graph":
+        target = selected_docs_folder.strip() if selected_docs_folder else ""
+        return _sidebar_ingested_files_for_graph(target)
+    target = folder_path.strip() if folder_path else ""
+    return _sidebar_ingested_files_for_folder(target)
+
+
+def preview_ingested_folder_files(folder_path: str) -> str:
+    return _sidebar_ingested_files_for_folder(folder_path)
+
+
+def preview_existing_graph_documents(selected_docs_folder: str) -> str:
+    return _sidebar_ingested_files_for_graph(selected_docs_folder)
+
+
+def preview_existing_graph_documents_for_mode(source_mode: str, selected_docs_folder: str) -> str:
+    if source_mode != "Use Existing Graph":
+        return ""
+    return _sidebar_ingested_files_for_graph(selected_docs_folder)
+
+
+def refresh_existing_graph_controls() -> Tuple[Any, str]:
+    choices = _discover_existing_graph_choices()
+    value = choices[0][1] if choices else None
+    return gr.update(choices=choices, value=value), _sidebar_ingested_files_for_graph(value or "")
+
+
+def update_source_mode(source_mode: str, folder_path: str, selected_docs_folder: str) -> Tuple[Any, Any, Any, str, str]:
     ingest_visible = source_mode == "Ingest Folder"
     load_visible = source_mode == "Use Existing Graph"
-    dropdown_update = refresh_existing_graph_dropdown() if load_visible else gr.update()
+    choices = _discover_existing_graph_choices() if load_visible else []
+    selected_value = selected_docs_folder if selected_docs_folder else None
+    valid_values = {value for _, value in choices}
+    if selected_value not in valid_values:
+        selected_value = choices[0][1] if choices else None
+    dropdown_update = (
+        gr.update(choices=choices, value=selected_value)
+        if load_visible
+        else gr.update()
+    )
 
     if load_visible:
-        count = len(_discover_existing_graph_choices())
+        count = len(choices)
         status = (
             f"Found {count} existing graph(s) in {_DOCS_ROOT}."
             if count
@@ -148,20 +253,22 @@ def update_source_mode(source_mode: str) -> Tuple[Any, Any, Any, str]:
         gr.update(visible=load_visible),
         dropdown_update,
         status,
+        _sidebar_ingested_files(source_mode, folder_path, selected_value or ""),
     )
 
 
-def load_existing_graph(selected_docs_folder: str) -> Tuple[str, str, str, Any, Any, Any]:
+def load_existing_graph(selected_docs_folder: str) -> Tuple[str, str, str, str, Any, Any, Any]:
     global mygraph
     updates = update_dropdowns()
+    sidebar_text = _sidebar_ingested_files_for_graph(selected_docs_folder)
 
     if not selected_docs_folder:
-        return render_graph_for_ui(mygraph), "Select an existing graph first.", "", *updates
+        return render_graph_for_ui(mygraph), "Select an existing graph first.", "", sidebar_text, *updates
 
     try:
         mygraph = _load_graph_from_pickle(selected_docs_folder)
     except Exception as exc:
-        return render_graph_for_ui(mygraph), f"Failed to load existing graph: {exc}", "", *updates
+        return render_graph_for_ui(mygraph), f"Failed to load existing graph: {exc}", "", sidebar_text, *updates
 
     _PATHRAG_CACHE.pop(selected_docs_folder, None)
     _LIGHTRAG_CACHE.pop(selected_docs_folder, None)
@@ -174,7 +281,8 @@ def load_existing_graph(selected_docs_folder: str) -> Tuple[str, str, str, Any, 
         docs_subfolder_name = selected_path.name
     message = f"Loaded existing graph from {_DOCS_ROOT_DIRNAME}/{docs_subfolder_name}"
     updates = update_dropdowns()
-    return render_graph_for_ui(mygraph), message, selected_docs_folder, *updates
+    sidebar_text = _sidebar_ingested_files_for_graph(selected_docs_folder)
+    return render_graph_for_ui(mygraph), message, selected_docs_folder, sidebar_text, *updates
 
 
 def _load_graph_from_storage(folder_path: str) -> nx.Graph:
@@ -389,12 +497,13 @@ def _ingestion_payload(
     graph: nx.Graph,
     status: str,
     active_folder_value: str,
-) -> Tuple[str, str, str, Any, Any, Any]:
+) -> Tuple[str, str, str, str, Any, Any, Any]:
     updates = update_dropdowns()
-    return render_graph_for_ui(graph), status, active_folder_value, *updates
+    sidebar_text = _sidebar_ingested_files_for_folder(active_folder_value)
+    return render_graph_for_ui(graph), status, active_folder_value, sidebar_text, *updates
 
 
-def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any, Any]]:
+def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, str, Any, Any, Any]]:
     global mygraph
 
     if not folder_path or not Path(folder_path).is_dir():
@@ -698,7 +807,17 @@ with gr.Blocks() as demo:
             with gr.Row():
                 refresh_existing_btn = gr.Button(value="Refresh Graph List")
                 load_existing_btn = gr.Button(value="Load Existing Graph", variant="primary")
-        status_messages = gr.Textbox(label="Status", interactive=False, lines=16)
+        ingested_files_box = gr.Textbox(
+            label="Ingested Documents",
+            interactive=False,
+            lines=10,
+            value="",
+        )
+        status_messages = gr.Textbox(
+            label="Status", 
+            interactive=False, 
+            lines=10
+        )
 
     with gr.Row(equal_height=False):
         with gr.Column(scale=1):
@@ -707,7 +826,8 @@ with gr.Blocks() as demo:
                     pathrag_chatbot = gr.Chatbot(
                         type="messages",
                         label="PathRAG Chat History",
-                        height=_GRAPH_PANEL_HEIGHT_PX,
+                        height=int(_GRAPH_PANEL_HEIGHT_PX / 2),
+                        resizable=True
                     )
                     pathrag_sources = gr.Textbox(label="PathRAG sources", interactive=False, lines=14)
                     with gr.Row():
@@ -725,7 +845,8 @@ with gr.Blocks() as demo:
                     lightrag_chatbot = gr.Chatbot(
                         type="messages",
                         label="LightRAG Chat History",
-                        height=_GRAPH_PANEL_HEIGHT_PX,
+                        height=int(_GRAPH_PANEL_HEIGHT_PX / 2),
+                        resizable=True
                     )
                     lightrag_sources = gr.Textbox(label="LightRAG sources", interactive=False, lines=14)
                     with gr.Row():
@@ -773,18 +894,32 @@ with gr.Blocks() as demo:
     go_btn.click(
         fn=handle_ingestion,
         inputs=[folder_path_input],
-        outputs=[graph_html, status_messages, active_folder, m1, m2, edit_node_dropdown],
+        outputs=[graph_html, status_messages, active_folder, ingested_files_box, m1, m2, edit_node_dropdown],
+    )
+    folder_path_input.change(
+        fn=preview_ingested_folder_files,
+        inputs=[folder_path_input],
+        outputs=[ingested_files_box],
     )
     source_mode.change(
         fn=update_source_mode,
-        inputs=[source_mode],
-        outputs=[ingest_controls, existing_graph_controls, existing_graph_dropdown, status_messages],
+        inputs=[source_mode, folder_path_input, existing_graph_dropdown],
+        outputs=[ingest_controls, existing_graph_controls, existing_graph_dropdown, status_messages, ingested_files_box],
     )
-    refresh_existing_btn.click(fn=refresh_existing_graph_dropdown, inputs=[], outputs=[existing_graph_dropdown])
+    existing_graph_dropdown.change(
+        fn=preview_existing_graph_documents_for_mode,
+        inputs=[source_mode, existing_graph_dropdown],
+        outputs=[ingested_files_box],
+    )
+    refresh_existing_btn.click(
+        fn=refresh_existing_graph_controls,
+        inputs=[],
+        outputs=[existing_graph_dropdown, ingested_files_box],
+    )
     load_existing_btn.click(
         fn=load_existing_graph,
         inputs=[existing_graph_dropdown],
-        outputs=[graph_html, status_messages, active_folder, m1, m2, edit_node_dropdown],
+        outputs=[graph_html, status_messages, active_folder, ingested_files_box, m1, m2, edit_node_dropdown],
     )
     apply_graph_filter_btn.click(fn=apply_graph_filter, inputs=[graph_filter_text, graph_filter_mode], outputs=[graph_html])
     graph_filter_text.submit(fn=apply_graph_filter, inputs=[graph_filter_text, graph_filter_mode], outputs=[graph_html])
@@ -818,6 +953,7 @@ with gr.Blocks() as demo:
 
     demo.load(fn=update_dropdowns, outputs=[m1, m2, edit_node_dropdown])
     demo.load(fn=refresh_existing_graph_dropdown, outputs=[existing_graph_dropdown])
+    demo.load(fn=preview_ingested_folder_files, inputs=[folder_path_input], outputs=[ingested_files_box])
 
 
 if __name__ == "__main__":

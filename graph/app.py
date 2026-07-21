@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import html
 import queue
 import tempfile
@@ -31,6 +32,7 @@ from project_paths import (
     list_document_paths,
     resolve_project_paths,
 )
+from artifact_cleanup import cleanup_graph_artifacts_best_effort
 
 mygraph = nx.Graph()
 _PATHRAG_CACHE: dict[str, PathRAG] = {}
@@ -146,6 +148,25 @@ def _project_paths_for_folder(folder_path: str) -> Optional[ProjectPaths]:
     return resolve_project_paths(folder_path)
 
 
+def _close_if_possible(obj: Any) -> None:
+    close_method = getattr(obj, "close", None)
+    if callable(close_method):
+        try:
+            close_method()
+        except Exception:
+            pass
+
+
+def _evict_cached_retrievers(folder_path: str) -> None:
+    pathrag = _PATHRAG_CACHE.pop(folder_path, None)
+    if pathrag is not None:
+        _close_if_possible(pathrag)
+
+    lightrag = _LIGHTRAG_CACHE.pop(folder_path, None)
+    if lightrag is not None:
+        _close_if_possible(lightrag)
+
+
 def refresh_existing_graph_dropdown() -> Any:
     choices = _discover_existing_graph_choices()
     value = choices[0][1] if choices else None
@@ -200,7 +221,7 @@ def _ingest_folder_file_filter_update(folder_path: str) -> Any:
 
 def _existing_graph_action_button_updates(action_mode: str) -> Tuple[Any, Any]:
     normalized = (action_mode or "Select documents from graph").strip().lower()
-    delete_selected = normalized == "Delete documents from graph"
+    delete_selected = normalized == "delete documents from graph"
     return gr.update(visible=not delete_selected), gr.update(visible=delete_selected)
 
 
@@ -279,8 +300,7 @@ def load_existing_graph(selected_docs_folder: str, selected_docs_filter: List[st
     use_doc_filter = bool(selected_docs_norm) and selected_docs_norm != available_docs_norm
     mygraph = _graph_filtered_to_documents(loaded_graph, selected_docs) if use_doc_filter else loaded_graph.copy()
 
-    _PATHRAG_CACHE.pop(selected_docs_folder, None)
-    _LIGHTRAG_CACHE.pop(selected_docs_folder, None)
+    _evict_cached_retrievers(selected_docs_folder)
 
     selected_path = Path(selected_docs_folder).expanduser().resolve()
     try:
@@ -325,8 +345,41 @@ def delete_existing_graph_documents(selected_docs_folder: str, selected_docs_to_
             doc_filter_update,
         )
 
+    storage: Optional[Storage] = None
     try:
         project_paths = resolve_project_paths(selected_docs_folder)
+
+        # If all existing docs were selected, remove only the knowledge graph snapshot folder.
+        # Keep sibling artifact folders (storage/logs/diagnostics) untouched.
+        existing_docs_before = _stored_document_names(selected_docs_folder)
+        existing_docs_norm = {name.lower() for name in existing_docs_before}
+        selected_docs_norm = {name.lower() for name in selected_docs}
+        delete_all_selected = bool(existing_docs_norm) and selected_docs_norm.issuperset(existing_docs_norm)
+        if delete_all_selected:
+            _evict_cached_retrievers(selected_docs_folder)
+            gc.collect()
+            cleanup_error = cleanup_graph_artifacts_best_effort(project_paths)
+            mygraph = nx.Graph()
+            active_folder_value = ""
+
+            refreshed_choices = _discover_existing_graph_choices()
+            selected_dropdown_value = refreshed_choices[0][1] if refreshed_choices else None
+            dropdown_update = gr.update(choices=refreshed_choices, value=selected_dropdown_value)
+            doc_filter_update = _existing_graph_document_filter_update(selected_dropdown_value or "")
+            updates = update_dropdowns()
+
+            deleted_count = len(existing_docs_before)
+            status = (
+                f"Deleted {deleted_count} selected document(s) from the database for {selected_docs_folder}."
+                "\nNo documents remain in this graph; knowledge_graph was removed and storage was emptied."
+            )
+            if cleanup_error:
+                status += (
+                    "\nSome knowledge_graph/storage artifacts are still locked by another process and could not be removed yet."
+                    f" Last lock error: {cleanup_error}"
+                )
+            return render_graph_for_ui(mygraph), status, active_folder_value, *updates, dropdown_update, doc_filter_update
+
         storage = Storage(paths=project_paths.storage)
         storage.init()
 
@@ -341,15 +394,19 @@ def delete_existing_graph_documents(selected_docs_folder: str, selected_docs_to_
 
         active_folder_value = selected_docs_folder
         if graph_removed_from_existing_list:
-            if project_paths.graph_pickle_file.exists():
-                project_paths.graph_pickle_file.unlink()
+            # Release Storage/Chroma references before cleaning knowledge_graph and storage on Windows.
+            _close_if_possible(storage)
+            storage = None
+            _evict_cached_retrievers(selected_docs_folder)
+            gc.collect()
+            cleanup_error = cleanup_graph_artifacts_best_effort(project_paths)
             mygraph = nx.Graph()
             active_folder_value = ""
         else:
+            cleanup_error = None
             mygraph = _load_graph_from_storage(selected_docs_folder)
 
-        _PATHRAG_CACHE.pop(selected_docs_folder, None)
-        _LIGHTRAG_CACHE.pop(selected_docs_folder, None)
+        _evict_cached_retrievers(selected_docs_folder)
 
         saved_path: Optional[Path] = None
         if not graph_removed_from_existing_list:
@@ -367,6 +424,11 @@ def delete_existing_graph_documents(selected_docs_folder: str, selected_docs_to_
         if deleted_count:
             if graph_removed_from_existing_list:
                 saved_note = "\nNo documents remain in this graph; it was removed from the existing graphs list."
+                if cleanup_error:
+                    saved_note += (
+                        "\nSome knowledge_graph/storage artifacts are still locked by another process and could not be removed yet."
+                        f" Last lock error: {cleanup_error}"
+                    )
             else:
                 saved_note = f"\nUpdated graph pickle saved to {saved_path}." if saved_path is not None else ""
             status = (
@@ -387,6 +449,9 @@ def delete_existing_graph_documents(selected_docs_folder: str, selected_docs_to_
             dropdown_update,
             doc_filter_update,
         )
+    finally:
+        if storage is not None:
+            _close_if_possible(storage)
 
 
 def update_existing_graph_documents_ui(source_mode: str, selected_docs_folder: str) -> Any:
@@ -412,7 +477,10 @@ def _load_graph_from_storage(folder_path: str) -> nx.Graph:
     if not Path(project_paths.storage.graph_db).exists():
         return nx.Graph()
     adapter = PathStorageAdapter(paths=project_paths.storage)
-    return adapter.graph.copy()
+    try:
+        return adapter.graph.copy()
+    finally:
+        _close_if_possible(adapter)
 
 
 def _list_document_paths_direct(documents_root: Path) -> List[Path]:
@@ -714,8 +782,7 @@ def handle_ingestion(folder_path: str, selected_ingest_files: List[str]) -> Iter
 
     summary = outcome["summary"]
     graph_from_storage = _load_graph_from_storage(str(documents_root))
-    _PATHRAG_CACHE.pop(str(documents_root), None)
-    _LIGHTRAG_CACHE.pop(str(documents_root), None)
+    _evict_cached_retrievers(str(documents_root))
 
     saved_path = _save_graph_pickle(str(documents_root), graph_from_storage)
     if saved_path is not None:
@@ -809,7 +876,7 @@ def _query_allowed_documents(
 ) -> Optional[set[str]]:
     use_existing_filter = (
         source_mode == "Use Existing Graph"
-        and (existing_action_mode or "").strip().lower() == "Select documents from graph"
+        and (existing_action_mode or "").strip().lower() == "select documents from graph"
     )
     selected = existing_selected_docs if use_existing_filter else ingest_selected_files
     names = {str(name).strip().lower() for name in (selected or []) if str(name).strip()}

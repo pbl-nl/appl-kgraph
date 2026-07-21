@@ -315,6 +315,12 @@ class StorageAdapter:
             return list(value)
         return [value]
 
+    def close(self) -> None:
+        close_method = getattr(self._storage, "close", None)
+        if callable(close_method):
+            close_method()
+        self._graph_snapshot = None
+
 
 def _distance_to_similarity(value: Any) -> float:
     """Convert distance to similarity score."""
@@ -1047,6 +1053,11 @@ class LightRAG:
             ),
         )
         self._chat = RetrieveChat(system_prompt=system_prompt)
+
+    def close(self) -> None:
+        close_method = getattr(self._storage, "close", None)
+        if callable(close_method):
+            close_method()
 
     async def aretrieve(
         self,

@@ -588,6 +588,12 @@ class StorageAdapter:
                 documents[doc_id] = record
         return documents
 
+    def close(self) -> None:
+        close_method = getattr(self._storage, "close", None)
+        if callable(close_method):
+            close_method()
+        self._graph_snapshot = None
+
 
 def _distance_to_similarity(value: Any) -> float:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -812,6 +818,11 @@ class PathRAG:
             ),
         )
         self._chat = RetrieveChat(system_prompt=system_prompt)
+
+    def close(self) -> None:
+        close_method = getattr(self._storage, "close", None)
+        if callable(close_method):
+            close_method()
 
     # ------------------------------------------------------------------
     # Retrieval entry points

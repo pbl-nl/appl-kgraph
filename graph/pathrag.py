@@ -26,6 +26,48 @@ from query_logging import write_audit_log
 
 LOGGER = logging.getLogger("PathRAG")
 
+
+def _normalise_document_filter(allowed_document_names: Optional[Iterable[str]]) -> Optional[set[str]]:
+    if not allowed_document_names:
+        return None
+    allowed = {
+        str(name).strip().lower()
+        for name in allowed_document_names
+        if str(name).strip()
+    }
+    return allowed or None
+
+
+def _filepath_matches_allowed(raw_filepaths: Any, allowed_documents: Optional[set[str]]) -> bool:
+    if not allowed_documents:
+        return True
+    raw = str(raw_filepaths or "")
+    if not raw:
+        return False
+    for token in raw.split("||"):
+        token = token.strip()
+        if not token:
+            continue
+        name = Path(token).name.strip().lower()
+        if name and name in allowed_documents:
+            return True
+    return False
+
+
+def _chunk_matches_allowed(chunk: "ChunkMatch", allowed_documents: Optional[set[str]]) -> bool:
+    if not allowed_documents:
+        return True
+    filename = (chunk.filename or "").strip()
+    document_id = (chunk.document_id or "").strip()
+    candidates = {
+        filename.lower(),
+        Path(filename).name.lower(),
+        document_id.lower(),
+        Path(document_id).name.lower(),
+    }
+    candidates.discard("")
+    return bool(candidates & allowed_documents)
+
 # ---------------------------------------------------------------------------
 # Verbosity helper
 # ---------------------------------------------------------------------------
@@ -781,6 +823,7 @@ class PathRAG:
         self,
         question: str,
         conversation_history: Optional[List[Tuple[str, str]]] = None,
+        allowed_document_names: Optional[Iterable[str]] = None,
     ) -> RetrievalResult:
         # TODO: add conversation history support. LightRAG first extracts keywords from history, then uses last n turns in system prompt.
         LOGGER.info("Running retrieval for query: %s", question)
@@ -797,6 +840,40 @@ class PathRAG:
             question,
             limit=settings.retrieval.chunk_top_k,
         )
+
+        allowed_documents = _normalise_document_filter(allowed_document_names)
+        if allowed_documents:
+            entity_matches = [
+                match
+                for match in entity_matches
+                if _filepath_matches_allowed(
+                    (self._storage.get_node(match.name) or {}).get("filepath", ""),
+                    allowed_documents,
+                )
+            ]
+            relation_matches = [
+                match
+                for match in relation_matches
+                if (
+                    _filepath_matches_allowed(
+                        (self._storage.graph.get_edge_data(match.source_name, match.target_name) or {}).get("filepath", ""),
+                        allowed_documents,
+                    )
+                    or _filepath_matches_allowed(
+                        (self._storage.get_node(match.source_name) or {}).get("filepath", ""),
+                        allowed_documents,
+                    )
+                    or _filepath_matches_allowed(
+                        (self._storage.get_node(match.target_name) or {}).get("filepath", ""),
+                        allowed_documents,
+                    )
+                )
+            ]
+            chunk_matches = [
+                match
+                for match in chunk_matches
+                if _chunk_matches_allowed(match, allowed_documents)
+            ]
 
         def build_global_windows(
             adapter: "StorageAdapter",
@@ -972,13 +1049,14 @@ class PathRAG:
         self,
         question: str,
         conversation_history: Optional[List[Tuple[str, str]]] = None,
+        allowed_document_names: Optional[Iterable[str]] = None,
     ) -> RetrievalResult:
         """Synchronous helper that creates an event loop if needed."""
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.aretrieve(question, conversation_history))
+            return asyncio.run(self.aretrieve(question, conversation_history, allowed_document_names))
         else:  # pragma: no cover - usage depends on embedding application
             raise RuntimeError(
                 "retrieve() cannot be used when an event loop is already running. "

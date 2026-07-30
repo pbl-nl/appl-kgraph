@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import html
 import queue
 import tempfile
@@ -14,7 +15,13 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from pyvis.network import Network
 
-from ingestion import ingest_paths
+from ingestion import ingest_paths, remove_document_from_storage
+from db_storage import Storage
+from existing_graphs import (
+    discover_existing_graph_choices as _discover_existing_graph_choices,
+    stored_document_names as _stored_document_names,
+    stored_document_names_from_database as _stored_document_names_from_database,
+)
 from lightrag import LightRAG
 from pathrag import PathRAG, StorageAdapter as PathStorageAdapter
 from settings import settings
@@ -25,6 +32,7 @@ from project_paths import (
     list_document_paths,
     resolve_project_paths,
 )
+from artifact_cleanup import cleanup_graph_artifacts_best_effort
 
 mygraph = nx.Graph()
 _PATHRAG_CACHE: dict[str, PathRAG] = {}
@@ -34,6 +42,38 @@ _DOCS_ROOT = Path(__file__).resolve().parents[1] / _DOCS_ROOT_DIRNAME
 _GRAPH_PANEL_HEIGHT_PX = 650
 _GRAPH_FILTER_TEXT = ""
 _GRAPH_FILTER_MODE = "contains"
+_APP_CSS = """
+#graph-source-inline .wrap,
+#graph-filter-match-inline .wrap {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap !important;
+}
+
+#graph-source-inline .wrap > label,
+#graph-filter-match-inline .wrap > label {
+    display: inline-flex !important;
+    align-items: center;
+    margin: 0;
+}
+
+#existing-graph-doc-filter,
+#existing-graph-doc-delete,
+#ingest-file-filter {
+    overflow: hidden;
+}
+
+#existing-graph-doc-filter .wrap,
+#existing-graph-doc-delete .wrap,
+#ingest-file-filter .wrap {
+    display: block !important;
+    max-height: 200px;
+    overflow-y: auto !important;
+    padding-right: 6px;
+}
+"""
 
 
 def generate_dynamic_type_colors(graph):
@@ -108,18 +148,23 @@ def _project_paths_for_folder(folder_path: str) -> Optional[ProjectPaths]:
     return resolve_project_paths(folder_path)
 
 
-def _discover_existing_graph_choices() -> List[Tuple[str, str]]:
-    if not _DOCS_ROOT.exists() or not _DOCS_ROOT.is_dir():
-        return []
+def _close_if_possible(obj: Any) -> None:
+    close_method = getattr(obj, "close", None)
+    if callable(close_method):
+        try:
+            close_method()
+        except Exception:
+            pass
 
-    choices: List[Tuple[str, str]] = []
-    pattern = f"*/{'.appl-kgraph'}/knowledge_graph/kg.pkl"
-    for kg_pickle in sorted(_DOCS_ROOT.glob(pattern), key=lambda p: str(p).lower()):
-        docs_folder = kg_pickle.parents[2]
-        rel_folder = docs_folder.relative_to(_DOCS_ROOT)
-        label = rel_folder.parts[0] if rel_folder.parts else docs_folder.name
-        choices.append((label, str(docs_folder)))
-    return choices
+
+def _evict_cached_retrievers(folder_path: str) -> None:
+    pathrag = _PATHRAG_CACHE.pop(folder_path, None)
+    if pathrag is not None:
+        _close_if_possible(pathrag)
+
+    lightrag = _LIGHTRAG_CACHE.pop(folder_path, None)
+    if lightrag is not None:
+        _close_if_possible(lightrag)
 
 
 def refresh_existing_graph_dropdown() -> Any:
@@ -128,13 +173,89 @@ def refresh_existing_graph_dropdown() -> Any:
     return gr.update(choices=choices, value=value)
 
 
-def update_source_mode(source_mode: str) -> Tuple[Any, Any, Any, str]:
+def _doc_names_from_node_data(data: dict[str, Any]) -> set[str]:
+    raw_filepaths = str(data.get("filepath", "") or "")
+    return {
+        Path(raw_path.strip()).name
+        for raw_path in raw_filepaths.split("||")
+        if raw_path.strip()
+    }
+
+
+def _graph_filtered_to_documents(graph: nx.Graph, selected_doc_names: List[str]) -> nx.Graph:
+    if not selected_doc_names:
+        return graph.copy()
+
+    selected = {name.strip().lower() for name in selected_doc_names if str(name).strip()}
+    if not selected:
+        return graph.copy()
+
+    matching_nodes = {
+        node
+        for node, data in graph.nodes(data=True)
+        if {name.lower() for name in _doc_names_from_node_data(data)} & selected
+    }
+    if not matching_nodes:
+        return nx.Graph()
+    return graph.subgraph(matching_nodes).copy()
+
+
+def _existing_graph_document_filter_update(selected_docs_folder: str) -> Any:
+    if not selected_docs_folder:
+        return gr.update(choices=[], value=[])
+    doc_names = _stored_document_names(selected_docs_folder)
+    return gr.update(choices=doc_names, value=[])
+
+
+def _ingest_folder_file_filter_update(folder_path: str) -> Any:
+    if not folder_path:
+        return gr.update(choices=[], value=[])
+
+    folder = Path(folder_path).expanduser().resolve()
+    if not folder.exists() or not folder.is_dir():
+        return gr.update(choices=[], value=[])
+
+    names = sorted({path.name for path in _list_document_paths_direct(folder)}, key=str.lower)
+    return gr.update(choices=names, value=[])
+
+
+def _existing_graph_action_button_updates(action_mode: str) -> Tuple[Any, Any]:
+    normalized = (action_mode or "Select documents from graph").strip().lower()
+    delete_selected = normalized == "delete documents from graph"
+    return gr.update(visible=not delete_selected), gr.update(visible=delete_selected)
+
+
+def refresh_existing_graph_controls() -> Tuple[Any, Any]:
+    choices = _discover_existing_graph_choices()
+    value = choices[0][1] if choices else None
+    doc_filter_update = _existing_graph_document_filter_update(value or "")
+    return (
+        gr.update(choices=choices, value=value),
+        doc_filter_update,
+    )
+
+
+def update_source_mode(
+    source_mode: str,
+    folder_path: str,
+    selected_docs_folder: str,
+    existing_action_mode: str,
+) -> Tuple[Any, Any, Any, str, Any, Any, Any, Any, Any]:
     ingest_visible = source_mode == "Ingest Folder"
     load_visible = source_mode == "Use Existing Graph"
-    dropdown_update = refresh_existing_graph_dropdown() if load_visible else gr.update()
+    choices = _discover_existing_graph_choices() if load_visible else []
+    selected_value = selected_docs_folder if selected_docs_folder else None
+    valid_values = {value for _, value in choices}
+    if selected_value not in valid_values:
+        selected_value = choices[0][1] if choices else None
+    dropdown_update = (
+        gr.update(choices=choices, value=selected_value)
+        if load_visible
+        else gr.update()
+    )
 
     if load_visible:
-        count = len(_discover_existing_graph_choices())
+        count = len(choices)
         status = (
             f"Found {count} existing graph(s) in {_DOCS_ROOT}."
             if count
@@ -143,15 +264,23 @@ def update_source_mode(source_mode: str) -> Tuple[Any, Any, Any, str]:
     else:
         status = "Ingest mode selected."
 
+    doc_filter_update = _existing_graph_document_filter_update(selected_value or "") if load_visible else gr.update(choices=[], value=[])
+    action_value = existing_action_mode if existing_action_mode else "Select documents from graph"
+    load_button_update, delete_button_update = _existing_graph_action_button_updates(action_value)
     return (
         gr.update(visible=ingest_visible),
         gr.update(visible=load_visible),
         dropdown_update,
         status,
+        gr.update(value=action_value),
+        doc_filter_update,
+        load_button_update if load_visible else gr.update(visible=False),
+        delete_button_update if load_visible else gr.update(visible=False),
+        _ingest_folder_file_filter_update(folder_path) if ingest_visible else gr.update(choices=[], value=[]),
     )
 
 
-def load_existing_graph(selected_docs_folder: str) -> Tuple[str, str, str, Any, Any, Any]:
+def load_existing_graph(selected_docs_folder: str, selected_docs_filter: List[str]) -> Tuple[str, str, str, Any, Any, Any]:
     global mygraph
     updates = update_dropdowns()
 
@@ -159,12 +288,19 @@ def load_existing_graph(selected_docs_folder: str) -> Tuple[str, str, str, Any, 
         return render_graph_for_ui(mygraph), "Select an existing graph first.", "", *updates
 
     try:
-        mygraph = _load_graph_from_pickle(selected_docs_folder)
+        loaded_graph = _load_graph_from_pickle(selected_docs_folder)
     except Exception as exc:
         return render_graph_for_ui(mygraph), f"Failed to load existing graph: {exc}", "", *updates
 
-    _PATHRAG_CACHE.pop(selected_docs_folder, None)
-    _LIGHTRAG_CACHE.pop(selected_docs_folder, None)
+    selected_docs = [str(name).strip() for name in (selected_docs_filter or []) if str(name).strip()]
+    selected_docs_norm = {name.lower() for name in selected_docs}
+    available_docs_norm = {name.lower() for name in _stored_document_names(selected_docs_folder)}
+
+    # Selecting every available document should be equivalent to no pre-load filter.
+    use_doc_filter = bool(selected_docs_norm) and selected_docs_norm != available_docs_norm
+    mygraph = _graph_filtered_to_documents(loaded_graph, selected_docs) if use_doc_filter else loaded_graph.copy()
+
+    _evict_cached_retrievers(selected_docs_folder)
 
     selected_path = Path(selected_docs_folder).expanduser().resolve()
     try:
@@ -172,9 +308,166 @@ def load_existing_graph(selected_docs_folder: str) -> Tuple[str, str, str, Any, 
         docs_subfolder_name = docs_relative.parts[0] if docs_relative.parts else selected_path.name
     except ValueError:
         docs_subfolder_name = selected_path.name
-    message = f"Loaded existing graph from {_DOCS_ROOT_DIRNAME}/{docs_subfolder_name}"
+    if use_doc_filter:
+        message = (
+            f"Loaded existing graph from {_DOCS_ROOT_DIRNAME}/{docs_subfolder_name} "
+            f"with {len(selected_docs)} selected document(s)."
+        )
+    elif selected_docs:
+        message = (
+            f"Loaded existing graph from {_DOCS_ROOT_DIRNAME}/{docs_subfolder_name} "
+            "with all documents selected (no filtering applied)."
+        )
+    else:
+        message = f"Loaded existing graph from {_DOCS_ROOT_DIRNAME}/{docs_subfolder_name}"
     updates = update_dropdowns()
     return render_graph_for_ui(mygraph), message, selected_docs_folder, *updates
+
+
+def delete_existing_graph_documents(selected_docs_folder: str, selected_docs_to_delete: List[str]) -> Tuple[str, str, str, Any, Any, Any, Any, Any]:
+    global mygraph
+    updates = update_dropdowns()
+    dropdown_update = gr.update()
+
+    if not selected_docs_folder:
+        doc_filter_update = _existing_graph_document_filter_update("")
+        return render_graph_for_ui(mygraph), "Select an existing graph first.", "", *updates, dropdown_update, doc_filter_update
+
+    selected_docs = [str(name).strip() for name in (selected_docs_to_delete or []) if str(name).strip()]
+    if not selected_docs:
+        doc_filter_update = _existing_graph_document_filter_update(selected_docs_folder)
+        return (
+            render_graph_for_ui(mygraph),
+            "Select one or more documents to delete.",
+            selected_docs_folder,
+            *updates,
+            dropdown_update,
+            doc_filter_update,
+        )
+
+    storage: Optional[Storage] = None
+    try:
+        project_paths = resolve_project_paths(selected_docs_folder)
+
+        # If all existing docs were selected, remove only the knowledge graph snapshot folder.
+        # Keep sibling artifact folders (storage/logs/diagnostics) untouched.
+        existing_docs_before = _stored_document_names(selected_docs_folder)
+        existing_docs_norm = {name.lower() for name in existing_docs_before}
+        selected_docs_norm = {name.lower() for name in selected_docs}
+        delete_all_selected = bool(existing_docs_norm) and selected_docs_norm.issuperset(existing_docs_norm)
+        if delete_all_selected:
+            _evict_cached_retrievers(selected_docs_folder)
+            gc.collect()
+            cleanup_error = cleanup_graph_artifacts_best_effort(project_paths)
+            mygraph = nx.Graph()
+            active_folder_value = ""
+
+            refreshed_choices = _discover_existing_graph_choices()
+            selected_dropdown_value = refreshed_choices[0][1] if refreshed_choices else None
+            dropdown_update = gr.update(choices=refreshed_choices, value=selected_dropdown_value)
+            doc_filter_update = _existing_graph_document_filter_update(selected_dropdown_value or "")
+            updates = update_dropdowns()
+
+            deleted_count = len(existing_docs_before)
+            status = (
+                f"Deleted {deleted_count} selected document(s) from the database for {selected_docs_folder}."
+                "\nNo documents remain in this graph; knowledge_graph was removed and storage was emptied."
+            )
+            if cleanup_error:
+                status += (
+                    "\nSome knowledge_graph/storage artifacts are still locked by another process and could not be removed yet."
+                    f" Last lock error: {cleanup_error}"
+                )
+            return render_graph_for_ui(mygraph), status, active_folder_value, *updates, dropdown_update, doc_filter_update
+
+        storage = Storage(paths=project_paths.storage)
+        storage.init()
+
+        deleted_count = 0
+        for filename in selected_docs:
+            if storage.get_document_by_filename(filename):
+                remove_document_from_storage(storage, filename)
+                deleted_count += 1
+
+        remaining_docs = _stored_document_names_from_database(selected_docs_folder)
+        graph_removed_from_existing_list = not remaining_docs
+
+        active_folder_value = selected_docs_folder
+        if graph_removed_from_existing_list:
+            # Release Storage/Chroma references before cleaning knowledge_graph and storage on Windows.
+            _close_if_possible(storage)
+            storage = None
+            _evict_cached_retrievers(selected_docs_folder)
+            gc.collect()
+            cleanup_error = cleanup_graph_artifacts_best_effort(project_paths)
+            mygraph = nx.Graph()
+            active_folder_value = ""
+        else:
+            cleanup_error = None
+            mygraph = _load_graph_from_storage(selected_docs_folder)
+
+        _evict_cached_retrievers(selected_docs_folder)
+
+        saved_path: Optional[Path] = None
+        if not graph_removed_from_existing_list:
+            saved_path = _save_graph_pickle(selected_docs_folder, mygraph)
+            if saved_path is not None:
+                mygraph = _load_graph_from_pickle(selected_docs_folder)
+
+        refreshed_choices = _discover_existing_graph_choices()
+        refreshed_values = {value for _, value in refreshed_choices}
+        selected_dropdown_value = active_folder_value if active_folder_value in refreshed_values else (refreshed_choices[0][1] if refreshed_choices else None)
+        dropdown_update = gr.update(choices=refreshed_choices, value=selected_dropdown_value)
+        doc_filter_update = _existing_graph_document_filter_update(selected_dropdown_value or "")
+        updates = update_dropdowns()
+
+        if deleted_count:
+            if graph_removed_from_existing_list:
+                saved_note = "\nNo documents remain in this graph; it was removed from the existing graphs list."
+                if cleanup_error:
+                    saved_note += (
+                        "\nSome knowledge_graph/storage artifacts are still locked by another process and could not be removed yet."
+                        f" Last lock error: {cleanup_error}"
+                    )
+            else:
+                saved_note = f"\nUpdated graph pickle saved to {saved_path}." if saved_path is not None else ""
+            status = (
+                f"Deleted {deleted_count} selected document(s) from the database for {selected_docs_folder}."
+                f"{saved_note}"
+            )
+        else:
+            status = "No selected documents were found in the database."
+
+        return render_graph_for_ui(mygraph), status, active_folder_value, *updates, dropdown_update, doc_filter_update
+    except Exception as exc:
+        doc_filter_update = _existing_graph_document_filter_update(selected_docs_folder)
+        return (
+            render_graph_for_ui(mygraph),
+            f"Failed to delete selected documents: {exc}",
+            selected_docs_folder,
+            *updates,
+            dropdown_update,
+            doc_filter_update,
+        )
+    finally:
+        if storage is not None:
+            _close_if_possible(storage)
+
+
+def update_existing_graph_documents_ui(source_mode: str, selected_docs_folder: str) -> Any:
+    if source_mode != "Use Existing Graph":
+        return gr.update(choices=[], value=[])
+    return _existing_graph_document_filter_update(selected_docs_folder)
+
+
+def update_existing_graph_action_ui(source_mode: str, existing_action_mode: str) -> Tuple[Any, Any]:
+    if source_mode != "Use Existing Graph":
+        return gr.update(visible=False), gr.update(visible=False)
+    return _existing_graph_action_button_updates(existing_action_mode)
+
+
+def update_ingest_folder_ui(folder_path: str) -> Any:
+    return _ingest_folder_file_filter_update(folder_path)
 
 
 def _load_graph_from_storage(folder_path: str) -> nx.Graph:
@@ -184,7 +477,10 @@ def _load_graph_from_storage(folder_path: str) -> nx.Graph:
     if not Path(project_paths.storage.graph_db).exists():
         return nx.Graph()
     adapter = PathStorageAdapter(paths=project_paths.storage)
-    return adapter.graph.copy()
+    try:
+        return adapter.graph.copy()
+    finally:
+        _close_if_possible(adapter)
 
 
 def _list_document_paths_direct(documents_root: Path) -> List[Path]:
@@ -262,6 +558,7 @@ def render_graph_iframe(graph: nx.Graph, height_px: int = _GRAPH_PANEL_HEIGHT_PX
 
     degrees = dict(graph.degree())
     max_degree = max(degrees.values(), default=1)
+    degree_scale = max(1, max_degree)
     min_size, max_size = 8, 40
 
     for node, data in graph.nodes(data=True):
@@ -276,7 +573,7 @@ def render_graph_iframe(graph: nx.Graph, height_px: int = _GRAPH_PANEL_HEIGHT_PX
         node_type = data.get("type", "unknown")
         node_color = type_colors.get(node_type, "#0EA5E9")
         node_degree = degrees.get(node, 1)
-        node_size = min_size + (max_size - min_size) * (node_degree / max_degree)
+        node_size = min_size + (max_size - min_size) * (node_degree / degree_scale)
         net.add_node(str(node), label=node_label, title=node_title, color=node_color, size=node_size)
 
     for source, target, data in graph.edges(data=True):
@@ -394,7 +691,7 @@ def _ingestion_payload(
     return render_graph_for_ui(graph), status, active_folder_value, *updates
 
 
-def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any, Any]]:
+def handle_ingestion(folder_path: str, selected_ingest_files: List[str]) -> Iterator[Tuple[str, str, str, Any, Any, Any]]:
     global mygraph
 
     if not folder_path or not Path(folder_path).is_dir():
@@ -402,8 +699,8 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any
         return
 
     documents_root = Path(folder_path).expanduser().resolve()
-    paths = _list_document_paths_direct(documents_root)
-    if not paths:
+    all_paths = _list_document_paths_direct(documents_root)
+    if not all_paths:
         empty_graph = nx.Graph()
         yield _ingestion_payload(
             empty_graph,
@@ -412,10 +709,32 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any
         )
         return
 
+    selected_names = {str(name).strip().lower() for name in (selected_ingest_files or []) if str(name).strip()}
+    paths = (
+        [path for path in all_paths if path.name.lower() in selected_names]
+        if selected_names
+        else all_paths
+    )
+    prune_missing_documents = False
+
+    if selected_names and not paths:
+        yield _ingestion_payload(
+            mygraph,
+            "No selected files were found in the folder. Refresh file selection and try again.",
+            str(documents_root),
+        )
+        return
+
     progress_messages: List[str] = []
     if settings.logging.verbosity_enabled:
+        selection_line = (
+            f"Selected files for ingestion: {len(paths)} of {len(all_paths)}"
+            if selected_names
+            else f"Selected files for ingestion: all ({len(all_paths)})"
+        )
         progress_messages = [
             f"Preparing ingestion for {documents_root}",
+            selection_line,
             f"Discovered {len(paths)} supported files",
         ]
         yield _ingestion_payload(mygraph, "\n".join(progress_messages), str(documents_root))
@@ -434,6 +753,7 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any
             outcome["summary"] = ingest_paths(
                 paths,
                 documents_root=documents_root,
+                prune_missing_documents=prune_missing_documents,
                 progress_callback=_report_progress,
             )
         except Exception as exc:
@@ -461,18 +781,18 @@ def handle_ingestion(folder_path: str) -> Iterator[Tuple[str, str, str, Any, Any
         return
 
     summary = outcome["summary"]
-    mygraph = _load_graph_from_storage(str(documents_root))
-    _PATHRAG_CACHE.pop(str(documents_root), None)
-    _LIGHTRAG_CACHE.pop(str(documents_root), None)
+    graph_from_storage = _load_graph_from_storage(str(documents_root))
+    _evict_cached_retrievers(str(documents_root))
 
-    pickle_note = ""
-    project_paths = resolve_project_paths(documents_root)
-    if not project_paths.graph_pickle_file.exists():
-        saved_path = _save_graph_pickle(str(documents_root), mygraph)
-        if saved_path is not None:
-            pickle_note = f"\nSaved baseline graph pickle to {saved_path}"
+    saved_path = _save_graph_pickle(str(documents_root), graph_from_storage)
+    if saved_path is not None:
+        mygraph = _load_graph_from_pickle(str(documents_root))
+        pickle_note = f"\nSaved working graph pickle to {saved_path}"
     else:
-        pickle_note = f"\nExisting working graph pickle preserved at {project_paths.graph_pickle_file}"
+        mygraph = graph_from_storage
+        pickle_note = "\nUnable to save working graph pickle; showing graph from storage state."
+
+    project_paths = resolve_project_paths(documents_root)
 
     status = (
         f"Ingested project at {documents_root}\n"
@@ -546,6 +866,21 @@ def _save_then_reload_graph(folder_path: str) -> Tuple[Optional[Path], Optional[
     except Exception as exc:
         return saved_path, f"Saved graph to {saved_path}, but failed to reload it: {exc}"
     return saved_path, None
+
+
+def _query_allowed_documents(
+    source_mode: str,
+    ingest_selected_files: List[str],
+    existing_action_mode: str,
+    existing_selected_docs: List[str],
+) -> Optional[set[str]]:
+    use_existing_filter = (
+        source_mode == "Use Existing Graph"
+        and (existing_action_mode or "").strip().lower() == "select documents from graph"
+    )
+    selected = existing_selected_docs if use_existing_filter else ingest_selected_files
+    names = {str(name).strip().lower() for name in (selected or []) if str(name).strip()}
+    return names or None
 
 
 def merge_nodes(node1: str, node2: str, active_folder: str) -> Tuple[str, str, Any, Any, Any]:
@@ -624,7 +959,15 @@ def update_node_attributes(node_id: str, new_label: str, new_type: str, new_desc
     return render_graph_for_ui(mygraph), f"Updated node '{node_id}'.{autosave}", *updates
 
 
-async def create_pathrag_response(question: str, chat_history: List[dict], active_folder: str) -> Tuple[str, List[dict], str]:
+async def create_pathrag_response(
+    question: str,
+    chat_history: List[dict],
+    active_folder: str,
+    source_mode: str,
+    ingest_selected_files: List[str],
+    existing_action_mode: str,
+    existing_selected_docs: List[str],
+) -> Tuple[str, List[dict], str]:
     if not active_folder:
         chat_history = list(chat_history or [])
         chat_history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
@@ -634,7 +977,12 @@ async def create_pathrag_response(question: str, chat_history: List[dict], activ
     history.append({"role": "user", "content": question})
     try:
         rag = _get_pathrag(active_folder)
-        result = await rag.aretrieve(question, conversation_history=_history_to_turns(history[:-1]))
+        allowed_docs = _query_allowed_documents(source_mode, ingest_selected_files, existing_action_mode, existing_selected_docs)
+        result = await rag.aretrieve(
+            question,
+            conversation_history=_history_to_turns(history[:-1]),
+            allowed_document_names=allowed_docs,
+        )
         history.append({"role": "assistant", "content": result.answer})
         sources = []
         for index, chunk in enumerate(result.chunk_matches, start=1):
@@ -648,7 +996,15 @@ async def create_pathrag_response(question: str, chat_history: List[dict], activ
         return "", history, f"PathRAG error: {exc}"
 
 
-async def create_lightrag_response(question: str, chat_history: List[dict], active_folder: str) -> Tuple[str, List[dict], str]:
+async def create_lightrag_response(
+    question: str,
+    chat_history: List[dict],
+    active_folder: str,
+    source_mode: str,
+    ingest_selected_files: List[str],
+    existing_action_mode: str,
+    existing_selected_docs: List[str],
+) -> Tuple[str, List[dict], str]:
     if not active_folder:
         chat_history = list(chat_history or [])
         chat_history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
@@ -658,7 +1014,12 @@ async def create_lightrag_response(question: str, chat_history: List[dict], acti
     history.append({"role": "user", "content": question})
     try:
         rag = _get_lightrag(active_folder)
-        result = await rag.aretrieve(question, conversation_history=_history_to_turns(history[:-1]))
+        allowed_docs = _query_allowed_documents(source_mode, ingest_selected_files, existing_action_mode, existing_selected_docs)
+        result = await rag.aretrieve(
+            question,
+            conversation_history=_history_to_turns(history[:-1]),
+            allowed_document_names=allowed_docs,
+        )
         history.append({"role": "assistant", "content": result.answer})
         sources = []
         for index, chunk in enumerate(result.all_chunks, start=1):
@@ -675,7 +1036,7 @@ async def create_lightrag_response(question: str, chat_history: List[dict], acti
         return "", history, f"LightRAG error: {exc}"
 
 
-with gr.Blocks() as demo:
+with gr.Blocks(css=_APP_CSS) as demo:
     gr.Markdown("## Interactive Hybrid RAG")
 
     active_folder = gr.State("")
@@ -685,9 +1046,17 @@ with gr.Blocks() as demo:
             choices=["Ingest Folder", "Use Existing Graph"],
             value="Ingest Folder",
             label="Graph Source",
+            elem_id="graph-source-inline",
         )
         with gr.Group(visible=True) as ingest_controls:
             folder_path_input = gr.Textbox(label="Document folder", placeholder="C:\\path\\to\\documents")
+            ingest_file_filter = gr.CheckboxGroup(
+                choices=[],
+                value=[],
+                label="Files to ingest",
+                info="Select one or more files. Leave empty to ingest all supported files.",
+                elem_id="ingest-file-filter",
+            )
             go_btn = gr.Button(value="Ingest Folder", variant="primary")
         with gr.Group(visible=False) as existing_graph_controls:
             existing_graph_dropdown = gr.Dropdown(
@@ -695,10 +1064,26 @@ with gr.Blocks() as demo:
                 label=f"Existing graph in {_DOCS_ROOT_DIRNAME}",
                 info=f"Scans {_DOCS_ROOT_DIRNAME}/*/.appl-kgraph/knowledge_graph/kg.pkl",
             )
+            existing_graph_action = gr.Radio(
+                choices=["Select documents from graph", "Delete documents from graph"],
+                value="Select documents from graph",
+                label="Existing graph action",
+            )
+            existing_graph_doc_selection = gr.CheckboxGroup(
+                choices=[],
+                value=[],
+                label="Documents",
+                elem_id="existing-graph-doc-filter",
+            )
             with gr.Row():
                 refresh_existing_btn = gr.Button(value="Refresh Graph List")
-                load_existing_btn = gr.Button(value="Load Existing Graph", variant="primary")
-        status_messages = gr.Textbox(label="Status", interactive=False, lines=16)
+                load_existing_btn = gr.Button(value="Load Graph", variant="primary", visible=True)
+                delete_existing_btn = gr.Button(value="Delete Selected Documents", variant="primary", visible=False)
+        status_messages = gr.Textbox(
+            label="Status", 
+            interactive=False, 
+            lines=10
+        )
 
     with gr.Row(equal_height=False):
         with gr.Column(scale=1):
@@ -707,13 +1092,14 @@ with gr.Blocks() as demo:
                     pathrag_chatbot = gr.Chatbot(
                         type="messages",
                         label="PathRAG Chat History",
-                        height=_GRAPH_PANEL_HEIGHT_PX,
+                        height=int(_GRAPH_PANEL_HEIGHT_PX / 2),
+                        resizable=True
                     )
                     pathrag_sources = gr.Textbox(label="PathRAG sources", interactive=False, lines=14)
                     with gr.Row():
                         pathrag_msg_input = gr.Textbox(
                             show_label=False,
-                            placeholder="Ask a question about the uploaded documents...",
+                            placeholder="Ask a question about the uploaded documents and Enter...",
                             scale=7,
                         )
                         pathrag_clear_btn = gr.ClearButton(
@@ -725,13 +1111,14 @@ with gr.Blocks() as demo:
                     lightrag_chatbot = gr.Chatbot(
                         type="messages",
                         label="LightRAG Chat History",
-                        height=_GRAPH_PANEL_HEIGHT_PX,
+                        height=int(_GRAPH_PANEL_HEIGHT_PX / 2),
+                        resizable=True
                     )
                     lightrag_sources = gr.Textbox(label="LightRAG sources", interactive=False, lines=14)
                     with gr.Row():
                         lightrag_msg_input = gr.Textbox(
                             show_label=False,
-                            placeholder="Ask a question about the uploaded documents...",
+                            placeholder="Ask a question about the uploaded documents and Enter...",
                             scale=7,
                         )
                         lightrag_clear_btn = gr.ClearButton(
@@ -744,15 +1131,16 @@ with gr.Blocks() as demo:
             graph_html = gr.HTML(render_graph_for_ui(mygraph))
             with gr.Row():
                 graph_filter_text = gr.Textbox(
-                    label="Graph label filter",
+                    label="Node label filter",
                     placeholder="Type label text to filter rendered graph",
-                    scale=5,
+                    scale=4,
                 )
                 graph_filter_mode = gr.Radio(
                     choices=["Contains", "Exact"],
                     value="Contains",
                     label="Match",
-                    scale=2,
+                    scale=3,
+                    elem_id="graph-filter-match-inline",
                 )
             with gr.Row():
                 apply_graph_filter_btn = gr.Button(value="Apply Filter", variant="primary")
@@ -772,19 +1160,43 @@ with gr.Blocks() as demo:
 
     go_btn.click(
         fn=handle_ingestion,
-        inputs=[folder_path_input],
+        inputs=[folder_path_input, ingest_file_filter],
         outputs=[graph_html, status_messages, active_folder, m1, m2, edit_node_dropdown],
+    )
+    folder_path_input.change(
+        fn=update_ingest_folder_ui,
+        inputs=[folder_path_input],
+        outputs=[ingest_file_filter],
     )
     source_mode.change(
         fn=update_source_mode,
-        inputs=[source_mode],
-        outputs=[ingest_controls, existing_graph_controls, existing_graph_dropdown, status_messages],
+        inputs=[source_mode, folder_path_input, existing_graph_dropdown, existing_graph_action],
+        outputs=[ingest_controls, existing_graph_controls, existing_graph_dropdown, status_messages, existing_graph_action, existing_graph_doc_selection, load_existing_btn, delete_existing_btn, ingest_file_filter],
     )
-    refresh_existing_btn.click(fn=refresh_existing_graph_dropdown, inputs=[], outputs=[existing_graph_dropdown])
+    existing_graph_dropdown.change(
+        fn=update_existing_graph_documents_ui,
+        inputs=[source_mode, existing_graph_dropdown],
+        outputs=[existing_graph_doc_selection],
+    )
+    existing_graph_action.change(
+        fn=update_existing_graph_action_ui,
+        inputs=[source_mode, existing_graph_action],
+        outputs=[load_existing_btn, delete_existing_btn],
+    )
+    refresh_existing_btn.click(
+        fn=refresh_existing_graph_controls,
+        inputs=[],
+        outputs=[existing_graph_dropdown, existing_graph_doc_selection],
+    )
     load_existing_btn.click(
         fn=load_existing_graph,
-        inputs=[existing_graph_dropdown],
+        inputs=[existing_graph_dropdown, existing_graph_doc_selection],
         outputs=[graph_html, status_messages, active_folder, m1, m2, edit_node_dropdown],
+    )
+    delete_existing_btn.click(
+        fn=delete_existing_graph_documents,
+        inputs=[existing_graph_dropdown, existing_graph_doc_selection],
+        outputs=[graph_html, status_messages, active_folder, m1, m2, edit_node_dropdown, existing_graph_dropdown, existing_graph_doc_selection],
     )
     apply_graph_filter_btn.click(fn=apply_graph_filter, inputs=[graph_filter_text, graph_filter_mode], outputs=[graph_html])
     graph_filter_text.submit(fn=apply_graph_filter, inputs=[graph_filter_text, graph_filter_mode], outputs=[graph_html])
@@ -805,12 +1217,28 @@ with gr.Blocks() as demo:
     )
     pathrag_msg_input.submit(
         fn=create_pathrag_response,
-        inputs=[pathrag_msg_input, pathrag_chatbot, active_folder],
+        inputs=[
+            pathrag_msg_input,
+            pathrag_chatbot,
+            active_folder,
+            source_mode,
+            ingest_file_filter,
+            existing_graph_action,
+            existing_graph_doc_selection,
+        ],
         outputs=[pathrag_msg_input, pathrag_chatbot, pathrag_sources],
     )
     lightrag_msg_input.submit(
         fn=create_lightrag_response,
-        inputs=[lightrag_msg_input, lightrag_chatbot, active_folder],
+        inputs=[
+            lightrag_msg_input,
+            lightrag_chatbot,
+            active_folder,
+            source_mode,
+            ingest_file_filter,
+            existing_graph_action,
+            existing_graph_doc_selection,
+        ],
         outputs=[lightrag_msg_input, lightrag_chatbot, lightrag_sources],
     )
     pathrag_clear_btn.click(fn=lambda: [None, None, None], inputs=[], outputs=[pathrag_msg_input, pathrag_chatbot, pathrag_sources], queue=False)
@@ -818,6 +1246,7 @@ with gr.Blocks() as demo:
 
     demo.load(fn=update_dropdowns, outputs=[m1, m2, edit_node_dropdown])
     demo.load(fn=refresh_existing_graph_dropdown, outputs=[existing_graph_dropdown])
+    demo.load(fn=update_ingest_folder_ui, inputs=[folder_path_input], outputs=[ingest_file_filter])
 
 
 if __name__ == "__main__":

@@ -836,6 +836,29 @@ class _ChromaBase:
                              where_document=where_document, include=["documents", "metadatas", "distances"])
         return self.to_list(res)
 
+    def close(self) -> None:
+        """Best-effort release of Chroma resources to avoid file locks on Windows."""
+        client = getattr(self, "client", None)
+        self.col = None  # type: ignore[assignment]
+        self.client = None  # type: ignore[assignment]
+        if client is None:
+            return
+
+        try:
+            system = getattr(client, "_system", None)
+            stop = getattr(system, "stop", None)
+            if callable(stop):
+                stop()
+        except Exception:
+            pass
+
+        try:
+            clear_cache = getattr(client, "clear_system_cache", None)
+            if callable(clear_cache):
+                clear_cache()
+        except Exception:
+            pass
+
     @staticmethod
     def to_list(results: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not results:
@@ -1079,6 +1102,30 @@ class Storage:
         self.documentsdb.init()
         self.chunksdb.init()
         self.graphdb.init()
+
+    def close(self) -> None:
+        """Best-effort release of vector storage resources."""
+        for attr_name in ("chunk_vectors", "entity_vectors", "relation_vectors"):
+            vector_store = getattr(self, attr_name, None)
+            if vector_store is None:
+                continue
+            try:
+                close_method = getattr(vector_store, "close", None)
+                if callable(close_method):
+                    close_method()
+            except Exception:
+                pass
+            setattr(self, attr_name, None)
+
+        self._chunk_search_cache = None
+        self._entity_search_cache = None
+        self._relation_search_cache = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _invalidate_chunk_cache(self) -> None:
         self._chunk_search_cache = None

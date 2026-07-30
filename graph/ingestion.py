@@ -32,6 +32,9 @@ LOGGER = configure_file_logger(
     enabled=settings.logging.internal_logging_enabled,
 )
 
+
+PENDING_CONTENT_HASH_PREFIX = "__PENDING_INGEST__::"
+
 #--------------------------------------------------
 # Helpers 
 #--------------------------------------------------
@@ -86,7 +89,30 @@ def should_skip_ingestion(storage: Storage, p: Path, content_hash: Optional[str]
     if not doc:
         return False
     ch = content_hash or file_sha256(p)
-    return doc.get("content_hash") == ch
+    if doc.get("content_hash") != ch:
+        return False
+
+    doc_id = doc.get("doc_id")
+    if not doc_id:
+        return False
+
+    chunks = storage.get_chunks_by_doc_id(doc_id)
+    if not chunks:
+        return False
+
+    # On environments where native vector mutations are disabled, chunk/entity/relation
+    # vectors are not persisted in Chroma and SQL-backed retrieval is used instead.
+    if getattr(storage, "_vector_mutations_disabled", False):
+        return True
+
+    for chunk in chunks:
+        chunk_uuid = chunk.get("chunk_uuid")
+        if not chunk_uuid:
+            return False
+        if not storage.get_chunk_vector(chunk_uuid):
+            return False
+
+    return True
 
 # Core functions ------------------------------------
 
@@ -575,18 +601,41 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
         return
 
     doc_id = doc["doc_id"]
+    doc_filepath = str(doc.get("filepath", "") or "").strip()
+    filename_lower = str(filename or "").strip().lower()
+
+    def _should_drop_filepath_token(token: str) -> bool:
+        raw = str(token or "").strip()
+        if not raw:
+            return False
+        if doc_filepath and raw == doc_filepath:
+            return True
+        token_name = Path(raw).name.strip().lower()
+        return bool(filename_lower and token_name == filename_lower)
+
+    def _prune_filepath_tokens(tokens: List[str]) -> str:
+        kept: List[str] = []
+        seen: set[str] = set()
+        for token in tokens or []:
+            normalized = str(token or "").strip()
+            if not normalized or _should_drop_filepath_token(normalized):
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            kept.append(normalized)
+        return delim.join(kept)
+
     LOGGER.info("Removing document %s (doc_id=%s)", filename, doc_id)
 
     # Step 1: Get all chunks associated with this document
     chunks = storage.get_chunks_by_doc_id(doc_id)
     if not chunks:
         LOGGER.info("No chunks found for document %s", filename)
-        # Still proceed to delete the document itself
-        storage.delete_document(doc_id)
-        return
-
-    chunk_uuids = [c["chunk_uuid"] for c in chunks]
-    LOGGER.info("Found %d chunks to process for %s", len(chunk_uuids), filename)
+        chunk_uuids: List[str] = []
+    else:
+        chunk_uuids = [c["chunk_uuid"] for c in chunks]
+        LOGGER.info("Found %d chunks to process for %s", len(chunk_uuids), filename)
 
     # Step 2: Process GraphDB - update nodes and edges
     delim = settings.ingestion.delimiter
@@ -602,10 +651,10 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
     nodes = [v for _,v in {n["name"]: n for n in nodes}.items()]
     edges = [v for _,v in {(e["source_name"], e["target_name"]): e for e in edges}.items()]
     
-    # make source_id a list for easier processing
-    nodes = [ {k: v if k != "source_id" else (v or "").split(delim) for k,v in n.items()} 
+    # make source_id/filepath lists for easier processing
+    nodes = [ {k: v if k not in {"source_id", "filepath"} else (v or "").split(delim) for k,v in n.items()} 
             for n in nodes]
-    edges = [ {k: v if k != "source_id" else (v or "").split(delim) for k,v in e.items()} 
+    edges = [ {k: v if k not in {"source_id", "filepath"} else (v or "").split(delim) for k,v in e.items()} 
             for e in edges]
     
     # One to one mapping of counts for each node/edge to chunk_uuids
@@ -643,12 +692,13 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
             # Update source_id by removing chunk_uuids
             new_source_ids = [s for s in n.get("source_id", []) if s not in chunk_uuids]
             new_source_id_str = delim.join(new_source_ids)
+            new_filepath_str = _prune_filepath_tokens(n.get("filepath", []))
             nodes_to_update.append({
                 "name": name,
                 "type": n.get("type", ""),
                 "description": n.get("description", ""),
                 "source_id": new_source_id_str,
-                "filepath": n.get("filepath", ""),
+                "filepath": new_filepath_str,
             })
 
     # Query edges
@@ -662,6 +712,7 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
             # Update source_id by removing chunk_uuids
             new_source_ids = [s for s in e.get("source_id", []) if s not in chunk_uuids]
             new_source_id_str = delim.join(new_source_ids)
+            new_filepath_str = _prune_filepath_tokens(e.get("filepath", []))
             edges_to_update.append({
                 "source_name": e["source_name"],
                 "target_name": e["target_name"],
@@ -669,7 +720,7 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
                 "description": e.get("description", ""),
                 "keywords": e.get("keywords", ""),
                 "source_id": new_source_id_str,
-                "filepath": e.get("filepath", ""),
+                "filepath": new_filepath_str,
             })
 
     # Apply graph updates
@@ -718,7 +769,8 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
 
     # Step 6: Remove chunks from ChunksDB
     LOGGER.info("Removing %d chunks from ChunksDB", len(chunk_uuids))
-    storage.delete_chunks_by_uuids(chunk_uuids)
+    if chunk_uuids:
+        storage.delete_chunks_by_uuids(chunk_uuids)
 
     # Step 7: Remove document from DocumentsDB
     LOGGER.info("Removing document from DocumentsDB")
@@ -735,6 +787,27 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
         chs = storage.get_chunks_by_doc_id(d)
         all_chunks.extend(chs or [])
     all_chunk_uuids = [c["chunk_uuid"] for c in all_chunks if c.get("chunk_uuid")]
+
+    if not all_chunk_uuids:
+        remaining_nodes = storage.graphdb.list_nodes()
+        remaining_edges = storage.graphdb.list_edges()
+        if remaining_edges:
+            edge_pairs = [(e["source_name"], e["target_name"]) for e in remaining_edges]
+            storage.delete_edges(edge_pairs)
+            storage.delete_relation_vector(edge_pairs)
+        if remaining_nodes:
+            node_names = [n["name"] for n in remaining_nodes]
+            storage.delete_nodes(node_names)
+            storage.delete_entity_vector(node_names)
+        LOGGER.info(
+            "No remaining chunks after deleting %s; cleared %d node(s) and %d edge(s)",
+            filename,
+            len(remaining_nodes),
+            len(remaining_edges),
+        )
+        LOGGER.info("Successfully removed document %s and all associated data", filename)
+        return
+
     nodes_after = storage.get_nodes_by_chunk_uuids(all_chunk_uuids)
     edges_after = storage.get_edges_by_chunk_uuids(all_chunk_uuids)
     node_names_after = {n["name"] for n in nodes_after if n.get("name")}
@@ -759,6 +832,7 @@ def ingest_paths(
     documents_root: Optional[Union[Path, str]] = None,
     project_paths: Optional[ProjectPaths] = None,
     storage_paths=None,
+    prune_missing_documents: bool = True,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -799,22 +873,25 @@ def ingest_paths(
     LOGGER.info("Starting ingestion for %d paths", len(paths))
     report(f"Queued {len(paths)} files for ingestion")
 
-    all_chunks: List[Dict[str, Any]] = []
-    all_entities: List[Dict[str, Any]]  = []
-    all_relations: List[Dict[str, Any]]  = []
+    total_chunks = 0
+    total_entities = 0
+    total_relations = 0
     processed_files = 0
     skipped_files = 0
     removed_files = 0
 
-    report("Scanning existing project documents")
-    # Remove documents that are no longer present
-    all_existing_docs = storage.get_all_documents()
-    existing_filenames = {doc["filename"] for doc in all_existing_docs if doc.get("filename")}
-    files_to_be_removed = existing_filenames - {p.name for p in paths}
-    for fname in files_to_be_removed:
-        report(f"Removing stale document {fname}")
-        remove_document_from_storage(storage, fname)
-        removed_files += 1
+    if prune_missing_documents:
+        report("Scanning existing project documents")
+        # Remove documents that are no longer present in the current ingest scope.
+        all_existing_docs = storage.get_all_documents()
+        existing_filenames = {doc["filename"] for doc in all_existing_docs if doc.get("filename")}
+        files_to_be_removed = existing_filenames - {p.name for p in paths}
+        for fname in files_to_be_removed:
+            report(f"Removing stale document {fname}")
+            remove_document_from_storage(storage, fname)
+            removed_files += 1
+    else:
+        report("Skipping stale-document pruning for partial ingest selection")
 
     total_paths = len(paths)
     for index, p in enumerate(paths, start=1):
@@ -844,7 +921,8 @@ def ingest_paths(
             report(f"{step_prefix} - parsing failed")
             skipped_files += 1
             continue
-        doc_exists = storage.get_document_by_filename(p.name).get("filename") == p.name if storage.get_document_by_filename(p.name) else False
+        existing_doc = storage.get_document_by_filename(p.name)
+        doc_exists = bool(existing_doc and existing_doc.get("filename") == p.name)
         if doc_exists: # document exists but content hash differs.
             report(f"{step_prefix} - replacing changed document")
             remove_document_from_storage(storage, p.name)
@@ -864,7 +942,8 @@ def ingest_paths(
             "extension": p.suffix.lower(),
             "mime_type": ((file_meta or {}).get("mime_type") or mimetypes.guess_type(str(p))[0] or ""),
             "language": (file_meta or {}).get("language", "unknown"),
-            "content_hash": content_hash,                
+            # Mark as pending until ALL file-level writes complete.
+            "content_hash": f"{PENDING_CONTENT_HASH_PREFIX}{content_hash}",
             "full_char_count": len(full_text),
         }
 
@@ -875,7 +954,7 @@ def ingest_paths(
             raw_text=full_text,
         )
 
-        report(f"{step_prefix} - storing document")
+        report(f"{step_prefix} - storing document (pending ingestion marker)")
         storage.add_document(doc_meta, full_text)  # from storage.py
 
         report(f"{step_prefix} - building chunks")
@@ -888,7 +967,7 @@ def ingest_paths(
         )
         report(f"{step_prefix} - storing {len(chunks)} chunks")
         storage.add_chunks(chunks)  # from storage.py
-        all_chunks.extend(chunks)
+        total_chunks += len(chunks)
 
         # Extract entities and relations from chunks
         # res['entities'], res['relationships'], res['content_keywords']
@@ -904,8 +983,9 @@ def ingest_paths(
 
         # Ensure all edge endpoints exist as nodes, create placeholders if needed
         placeholders = ensure_edge_endpoints(storage, edges_in)
+        file_entities_for_vectors: List[Dict[str, Any]] = []
         if placeholders:
-            all_entities.extend(placeholders)           # collect for vector DB later
+            file_entities_for_vectors.extend(placeholders)
 
         report(f"{step_prefix} - merging graph data")
         nodes, edges = merge_graph_data(storage, entities_in, edges_in)
@@ -913,31 +993,40 @@ def ingest_paths(
         if nodes:
             report(f"{step_prefix} - writing {len(nodes)} entities")
             storage.upsert_nodes(nodes)                 # write schema
-            all_entities.extend(nodes)                  # collect for vector DB later
+            file_entities_for_vectors.extend(nodes)
+            total_entities += len(nodes)
 
         # Group/merge edges and upsert
         if edges:
             report(f"{step_prefix} - writing {len(edges)} relations")
             storage.upsert_edges(edges)                 # write schema
-            all_relations.extend(edges)                 # collect for vector DB later
+            total_relations += len(edges)
+
+        # Persist vectors per file so completed files do not need reprocessing
+        # if ingestion stops midway through a larger batch.
+        if chunks:
+            report(f"{step_prefix} - writing chunk vectors")
+            storage.upsert_chunk_vector(chunks)
+
+        deduped_entities = dedupe_entities_for_vectors(file_entities_for_vectors)
+        if deduped_entities:
+            report(f"{step_prefix} - writing entity vectors")
+            storage.upsert_entity_vector(deduped_entities)
+
+        if edges:
+            report(f"{step_prefix} - writing relation vectors")
+            storage.upsert_relation_vector(edges)
         validation_results = res.get("validation_results") or []
         if validation_results:
             report(f"{step_prefix} - writing extraction diagnostics")
         _write_extraction_diagnostics(active_project_paths, p.name, validation_results)
+
+        # Finalize ingestion marker only after schema, vectors, and diagnostics are done.
+        report(f"{step_prefix} - finalizing ingestion marker")
+        storage.upsert_document(doc_meta["doc_id"], {"content_hash": content_hash})
         report(f"{step_prefix} - completed")
         processed_files += 1
 
-    # Finally, add all chunks, entities, and relations to vector DB   
-    if all_chunks:
-        report("Writing chunk vectors")
-        storage.upsert_chunk_vector(all_chunks) # from storage.py
-        deduped_entities = dedupe_entities_for_vectors(all_entities)
-        if deduped_entities:
-            report("Writing entity vectors")
-            storage.upsert_entity_vector(deduped_entities)
-        if all_relations:
-            report("Writing relation vectors")
-            storage.upsert_relation_vector(all_relations)
     report("Writing retrieval snapshot")
     retrieval_snapshot = _write_retrieval_graph_snapshot(storage, active_project_paths)
     report("Completed ingestion")
@@ -946,9 +1035,9 @@ def ingest_paths(
         processed_files,
         skipped_files,
         removed_files,
-        len(all_chunks),
-        len(all_entities),
-        len(all_relations),
+        total_chunks,
+        total_entities,
+        total_relations,
         retrieval_snapshot,
     )
     return {
@@ -958,9 +1047,9 @@ def ingest_paths(
         "processed_files": processed_files,
         "skipped_files": skipped_files,
         "removed_files": removed_files,
-        "chunk_count": len(all_chunks),
-        "entity_count": len(all_entities),
-        "relation_count": len(all_relations),
+        "chunk_count": total_chunks,
+        "entity_count": total_entities,
+        "relation_count": total_relations,
     }
 
 

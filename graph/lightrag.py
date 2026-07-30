@@ -26,6 +26,48 @@ from query_logging import write_audit_log
 
 LOGGER = logging.getLogger("LightRAG")
 
+
+def _normalise_document_filter(allowed_document_names: Optional[Iterable[str]]) -> Optional[set[str]]:
+    if not allowed_document_names:
+        return None
+    allowed = {
+        str(name).strip().lower()
+        for name in allowed_document_names
+        if str(name).strip()
+    }
+    return allowed or None
+
+
+def _filepath_matches_allowed(raw_filepaths: Any, allowed_documents: Optional[set[str]]) -> bool:
+    if not allowed_documents:
+        return True
+    raw = str(raw_filepaths or "")
+    if not raw:
+        return False
+    for token in raw.split("||"):
+        token = token.strip()
+        if not token:
+            continue
+        name = Path(token).name.strip().lower()
+        if name and name in allowed_documents:
+            return True
+    return False
+
+
+def _chunk_matches_allowed(chunk: Dict[str, Any], allowed_documents: Optional[set[str]]) -> bool:
+    if not allowed_documents:
+        return True
+    filename = str(chunk.get("filename", "") or "").strip()
+    document_id = str(chunk.get("document_id", "") or "").strip()
+    candidates = {
+        filename.lower(),
+        Path(filename).name.lower(),
+        document_id.lower(),
+        Path(document_id).name.lower(),
+    }
+    candidates.discard("")
+    return bool(candidates & allowed_documents)
+
 # ---------------------------------------------------------------------------
 # Verbosity helper
 # ---------------------------------------------------------------------------
@@ -272,6 +314,12 @@ class StorageAdapter:
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
             return list(value)
         return [value]
+
+    def close(self) -> None:
+        close_method = getattr(self._storage, "close", None)
+        if callable(close_method):
+            close_method()
+        self._graph_snapshot = None
 
 
 def _distance_to_similarity(value: Any) -> float:
@@ -743,6 +791,7 @@ def build_context(
     top_k_relations: int,
     top_k_chunks: int,
     top_k_chunk_per_entity: int,
+    allowed_document_names: Optional[Iterable[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Build complete context for the query.
@@ -761,8 +810,46 @@ def build_context(
         adapter, hl_keywords, top_k_relations
     ) if retrieval_mode in ("global", "hybrid", "mix") else ([], [], [], [])
 
+    allowed_documents = _normalise_document_filter(allowed_document_names)
+    if allowed_documents:
+        node_datas = [
+            node for node in node_datas
+            if _filepath_matches_allowed(node.get("filepath", ""), allowed_documents)
+        ]
+        use_relations = [
+            edge for edge in use_relations
+            if _filepath_matches_allowed(edge.get("filepath", ""), allowed_documents)
+        ]
+        entities_context1 = [
+            item for item in entities_context1
+            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
+        ]
+        relations_context1 = [
+            item for item in relations_context1
+            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
+        ]
+
+        edge_datas = [
+            edge for edge in edge_datas
+            if _filepath_matches_allowed(edge.get("filepath", ""), allowed_documents)
+        ]
+        use_entities = [
+            node for node in use_entities
+            if _filepath_matches_allowed(node.get("filepath", ""), allowed_documents)
+        ]
+        entities_context2 = [
+            item for item in entities_context2
+            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
+        ]
+        relations_context2 = [
+            item for item in relations_context2
+            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
+        ]
+
     # 2.c) Get vector context
     vector_chunks = get_vector_context(adapter, query, top_k_chunks) if retrieval_mode in ("mix", "naive") else []
+    if allowed_documents:
+        vector_chunks = [chunk for chunk in vector_chunks if _chunk_matches_allowed(chunk, allowed_documents)]
 
     # Combine contexts
     seen = {e["entity"] for e in entities_context1}
@@ -798,6 +885,9 @@ def build_context(
 
     # 3.b) Extract chunks from edges
     relationship_chunks = extract_chunks_from_edges(adapter, original_edge_datas, top_k_chunk_per_entity)
+    if allowed_documents:
+        entity_chunks = [chunk for chunk in entity_chunks if _chunk_matches_allowed(chunk, allowed_documents)]
+        relationship_chunks = [chunk for chunk in relationship_chunks if _chunk_matches_allowed(chunk, allowed_documents)]
 
     # 4) Combine and deduplicate chunks
     all_chunks = list(vector_chunks)
@@ -964,10 +1054,16 @@ class LightRAG:
         )
         self._chat = RetrieveChat(system_prompt=system_prompt)
 
+    def close(self) -> None:
+        close_method = getattr(self._storage, "close", None)
+        if callable(close_method):
+            close_method()
+
     async def aretrieve(
         self,
         question: str,
         conversation_history: Optional[List[Tuple[str, str]]] = None,
+        allowed_document_names: Optional[Iterable[str]] = None,
     ) -> RetrievalResult:
         """Asynchronous retrieval method."""
         LOGGER.info("Running LightRAG retrieval for query: %s", question)
@@ -1011,6 +1107,7 @@ class LightRAG:
             top_k_relations=settings.retrieval.relation_top_k,
             top_k_chunks=settings.retrieval.chunk_top_k,
             top_k_chunk_per_entity=settings.retrieval.top_k_chunk_per_entity,
+            allowed_document_names=allowed_document_names,
         )
 
         # Format context for prompt
@@ -1070,12 +1167,13 @@ class LightRAG:
         self,
         question: str,
         conversation_history: Optional[List[Tuple[str, str]]] = None,
+        allowed_document_names: Optional[Iterable[str]] = None,
     ) -> RetrievalResult:
         """Synchronous helper that creates an event loop if needed."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.aretrieve(question, conversation_history))
+            return asyncio.run(self.aretrieve(question, conversation_history, allowed_document_names))
         else:
             raise RuntimeError(
                 "retrieve() cannot be used when an event loop is already running. "

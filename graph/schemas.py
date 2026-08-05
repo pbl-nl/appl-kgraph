@@ -285,10 +285,37 @@ class QueryPlan:
     high_level_keywords: List[str] = field(default_factory=list)
     low_level_keywords: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    strategy: str = "generic"
+    mode: Optional[str] = None
+    seed_entities: Tuple[str, ...] = field(default_factory=tuple)
+    settings: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):
             raise TypeError("query must be a string")
+        history = tuple(tuple(turn) for turn in self.history)
+        for turn in history:
+            if len(turn) != 2 or not all(isinstance(value, str) for value in turn):
+                raise TypeError("history must contain string (role, message) pairs")
+        high_level_keywords = list(self.high_level_keywords)
+        low_level_keywords = list(self.low_level_keywords)
+        if not all(isinstance(value, str) for value in high_level_keywords):
+            raise TypeError("high_level_keywords must contain strings")
+        if not all(isinstance(value, str) for value in low_level_keywords):
+            raise TypeError("low_level_keywords must contain strings")
+        _require_identifier(self.strategy, "query strategy")
+        if self.mode is not None and not isinstance(self.mode, str):
+            raise TypeError("query mode must be a string or None")
+        seed_entities = tuple(self.seed_entities)
+        for name in seed_entities:
+            _require_identifier(name, "seed entity")
+        if len(set(seed_entities)) != len(seed_entities):
+            raise ValueError("seed entities must be unique")
+        object.__setattr__(self, "history", history)
+        object.__setattr__(self, "high_level_keywords", high_level_keywords)
+        object.__setattr__(self, "low_level_keywords", low_level_keywords)
+        object.__setattr__(self, "seed_entities", seed_entities)
+        object.__setattr__(self, "settings", _owned_metadata(self.settings))
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 

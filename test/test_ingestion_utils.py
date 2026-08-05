@@ -356,7 +356,10 @@ def test_ingestion_does_not_skip_file_after_crash_post_chunk_vectors(monkeypatch
         first_run = True
 
         def __init__(self, *args, **kwargs):
-            pass
+            self.graphdb = SimpleNamespace(
+                list_nodes=lambda: [],
+                list_edges=lambda: [],
+            )
 
         def init(self):
             return None

@@ -31,6 +31,9 @@ class _StorageSpy:
     def add_document(self, metadata, full_text):
         self.calls.append(("add_document", metadata, full_text))
 
+    def upsert_document(self, doc_id, updates):
+        self.calls.append(("upsert_document", doc_id, updates))
+
     def add_chunks(self, chunks):
         self.calls.append(("add_chunks", chunks))
 
@@ -101,8 +104,8 @@ def test_ingest_paths_orchestrates_writes_and_returns_summary(tmp_path, monkeypa
         chunk_calls.append((pages, doc_id, filename, metadata))
         return chunks
 
-    def fake_extract(chunks_to_extract, *, storage, validation_enabled):
-        extraction_calls.append((chunks_to_extract, storage, validation_enabled))
+    def fake_extract(chunks_to_extract, *, storage):
+        extraction_calls.append((chunks_to_extract, storage))
         return {
             "entities": [node],
             "relationships": [edge],
@@ -123,7 +126,6 @@ def test_ingest_paths_orchestrates_writes_and_returns_summary(tmp_path, monkeypa
     summary = ingestion.ingest_paths(
         [document],
         storage_paths="storage-paths",
-        audit_enabled=True,
         progress_callback=progress.append,
     )
 
@@ -135,7 +137,7 @@ def test_ingest_paths_orchestrates_writes_and_returns_summary(tmp_path, monkeypa
         "skipped_files": 0,
         "removed_files": 0,
         "chunk_count": 1,
-        "entity_count": 2,
+        "entity_count": 1,
         "relation_count": 1,
     }
     assert [call[0] for call in storage.calls] == [
@@ -149,11 +151,14 @@ def test_ingest_paths_orchestrates_writes_and_returns_summary(tmp_path, monkeypa
         "upsert_chunk_vector",
         "upsert_entity_vector",
         "upsert_relation_vector",
+        "upsert_document",
     ]
     stored_metadata = storage.calls[3][1]
     assert stored_metadata["doc_id"] == "doc-1"
     assert stored_metadata["filename"] == document.name
-    assert stored_metadata["content_hash"] == "content-hash"
+    assert stored_metadata["content_hash"] == (
+        f"{ingestion.PENDING_CONTENT_HASH_PREFIX}content-hash"
+    )
     assert stored_metadata["language"] == "en"
     assert storage.calls[3][2] == "First\nSecond"
     assert chunk_calls == [
@@ -167,7 +172,12 @@ def test_ingest_paths_orchestrates_writes_and_returns_summary(tmp_path, monkeypa
             },
         )
     ]
-    assert extraction_calls == [(chunks, storage, True)]
+    assert extraction_calls == [(chunks, storage)]
+    assert storage.calls[-1] == (
+        "upsert_document",
+        "doc-1",
+        {"content_hash": "content-hash"},
+    )
     assert progress[0] == "Initializing project storage"
     assert progress[-1] == "Completed ingestion"
 

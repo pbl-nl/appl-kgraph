@@ -107,12 +107,35 @@ class EnrichedDocument:
     raw: RawDocument
     text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+    transformations: Tuple[str, ...] = field(default_factory=tuple)
+    pages: Optional[Tuple[Tuple[int, str], ...]] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.raw, RawDocument):
             raise TypeError("raw must be a RawDocument")
         if not isinstance(self.text, str):
             raise TypeError("enriched text must be a string")
+        pages = self.raw.pages if self.pages is None else tuple(self.pages)
+        for expected_number, page in enumerate(pages):
+            if (
+                isinstance(page, (str, bytes))
+                or not isinstance(page, Sequence)
+                or len(page) != 2
+            ):
+                raise TypeError("each enriched page must be a (page_number, text) pair")
+            page_number, page_text = page
+            _require_non_negative_integer(page_number, "enriched page number")
+            if page_number != expected_number:
+                raise ValueError("enriched page numbers must be zero-based and contiguous")
+            if not isinstance(page_text, str):
+                raise TypeError("enriched page text must be a string")
+        if self.text != "\n".join(page_text for _, page_text in pages):
+            raise ValueError("enriched text must equal the newline-joined page text")
+        object.__setattr__(self, "pages", tuple(pages))
+        transformations = tuple(self.transformations)
+        for transformation in transformations:
+            _require_identifier(transformation, "transformation name")
+        object.__setattr__(self, "transformations", transformations)
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 

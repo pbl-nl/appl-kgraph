@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 import os
 # local imports
 from db_storage import Storage, _normalize_pair
+from enrichment import normalize_document_metadata
 from fileparser import FileParser
 from chunker import chunk_parsed_pages
 from extractor import extract_from_chunks
@@ -49,12 +50,7 @@ def normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Normalized metadata with lowercase keys.
     """
-    # Lower-case keys, unify language key
-    meta = {str(k).lower(): v for k, v in (meta or {}).items()}
-    # normalize to 'language'
-    if "Language" in meta and "language" not in meta:
-        meta["language"] = meta.pop("Language")
-    return meta
+    return normalize_document_metadata(meta)
 
 def file_sha256(p: Path, chunk_size=1024*1024) -> str:
     """

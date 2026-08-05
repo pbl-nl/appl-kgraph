@@ -240,6 +240,8 @@ class ExtractionResult:
 class GraphDelta:
     entities: List[Entity] = field(default_factory=list)
     relations: List[Relation] = field(default_factory=list)
+    deleted_entity_names: Tuple[str, ...] = field(default_factory=tuple)
+    deleted_relation_pairs: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -256,6 +258,23 @@ class GraphDelta:
         ]
         if len(set(relation_pairs)) != len(relation_pairs):
             raise ValueError("GraphDelta relation pairs must be unique")
+        deleted_entity_names = tuple(self.deleted_entity_names)
+        for name in deleted_entity_names:
+            _require_identifier(name, "deleted entity name")
+        if len(set(deleted_entity_names)) != len(deleted_entity_names):
+            raise ValueError("deleted entity names must be unique")
+        deleted_relation_pairs = tuple(
+            tuple(sorted(pair)) for pair in self.deleted_relation_pairs
+        )
+        for pair in deleted_relation_pairs:
+            if len(pair) != 2:
+                raise ValueError("deleted relation pairs must contain two names")
+            _require_identifier(pair[0], "deleted relation source name")
+            _require_identifier(pair[1], "deleted relation target name")
+        if len(set(deleted_relation_pairs)) != len(deleted_relation_pairs):
+            raise ValueError("deleted relation pairs must be unique")
+        object.__setattr__(self, "deleted_entity_names", deleted_entity_names)
+        object.__setattr__(self, "deleted_relation_pairs", deleted_relation_pairs)
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 

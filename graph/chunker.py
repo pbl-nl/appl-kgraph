@@ -38,8 +38,11 @@ Each item in `chunks` is a dict:
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any, Iterable
+from typing import Any, Callable, Dict, Iterable, List, Tuple
+
+from schemas import Chunk, EnrichedDocument
 from settings import settings
 
 
@@ -48,6 +51,35 @@ from settings import settings
 _SENT_END_SPLIT = re.compile(
     r'([.!?]["\')\]]*)(\s+)(?=[A-Za-z0-9"\(])'
 )
+
+
+@dataclass(frozen=True)
+class ChunkingConfig:
+    """Validated settings accepted by the typed chunking connector."""
+
+    max_chars: int = settings.chunking.max_chars
+    overlap_chars: int = settings.chunking.overlap_chars
+    include_overlap_in_limit: bool = settings.chunking.include_overlap_in_limit
+    join_with: str = settings.chunking.join_with
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_chars, bool) or not isinstance(self.max_chars, int):
+            raise TypeError("max_chars must be an integer")
+        if self.max_chars <= 0:
+            raise ValueError("max_chars must be greater than zero")
+        if isinstance(self.overlap_chars, bool) or not isinstance(
+            self.overlap_chars,
+            int,
+        ):
+            raise TypeError("overlap_chars must be an integer")
+        if self.overlap_chars < 0:
+            raise ValueError("overlap_chars must be zero or greater")
+        if self.overlap_chars >= self.max_chars:
+            raise ValueError("overlap_chars must be smaller than max_chars")
+        if not isinstance(self.include_overlap_in_limit, bool):
+            raise TypeError("include_overlap_in_limit must be a boolean")
+        if not isinstance(self.join_with, str):
+            raise TypeError("join_with must be a string")
 
 
 def _normalize_ws(text: str) -> str:
@@ -262,6 +294,75 @@ def chunk_parsed_pages(
 
         # Prepare for next iteration
         prev_new_sentence_indices = [s.idx for s in new_sents]
+
+    return chunks
+
+
+def chunk_document(
+    document: EnrichedDocument,
+    config: ChunkingConfig,
+    *,
+    id_factory: Callable[[], object] = uuid.uuid4,
+) -> List[Chunk]:
+    """Convert one enriched document into canonical, storage-ready chunks."""
+
+    if not isinstance(document, EnrichedDocument):
+        raise TypeError("document must be an EnrichedDocument")
+    if not isinstance(config, ChunkingConfig):
+        raise TypeError("config must be a ChunkingConfig")
+
+    raw_chunks = chunk_parsed_pages(
+        list(document.pages),
+        max_chars=config.max_chars,
+        overlap_chars=config.overlap_chars,
+        include_overlap_in_limit=config.include_overlap_in_limit,
+        join_with=config.join_with,
+    )
+    language = document.metadata.get(
+        "language",
+        document.raw.metadata.get("language"),
+    )
+    filepath = str(document.raw.ref.path.resolve())
+    chunks = []
+    seen_ids = set()
+
+    for index, raw_chunk in enumerate(raw_chunks):
+        chunk_uuid = str(id_factory())
+        if not chunk_uuid.strip():
+            raise ValueError("id_factory must return a non-empty identifier")
+        if chunk_uuid in seen_ids:
+            raise ValueError("id_factory returned a duplicate identifier")
+        seen_ids.add(chunk_uuid)
+
+        text = raw_chunk.get("text", "") or ""
+        metadata = {
+            key: value
+            for key, value in raw_chunk.items()
+            if key
+            not in {
+                "chunk_uuid",
+                "chunk_id",
+                "text",
+                "char_count",
+                "start_page",
+                "end_page",
+            }
+        }
+        chunks.append(
+            Chunk(
+                chunk_uuid=chunk_uuid,
+                doc_id=document.raw.doc_id,
+                chunk_id=int(raw_chunk.get("chunk_id", index)),
+                filename=document.raw.ref.path.name,
+                filepath=filepath,
+                document_language=language,
+                text=text,
+                char_count=len(text),
+                start_page=int(raw_chunk.get("start_page", 0)),
+                end_page=int(raw_chunk.get("end_page", 0)),
+                metadata=metadata,
+            )
+        )
 
     return chunks
 

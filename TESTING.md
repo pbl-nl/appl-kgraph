@@ -10,7 +10,7 @@ Run both the unit and storage integration suites:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Baseline on June 22, 2026: 37 tests passed.
+Baseline on August 5, 2026: 153 tests passed.
 
 ## Unit Tests
 
@@ -20,7 +20,8 @@ Exclude tests that exercise the storage integrations:
 .\.venv\Scripts\python.exe -m pytest -q -m "not storage_integration"
 ```
 
-Baseline on June 22, 2026: 29 tests passed.
+Baseline on August 5, 2026: 145 tests passed and 8 storage integration
+tests were deselected.
 
 ## Storage Integration Tests
 
@@ -38,6 +39,9 @@ Baseline on June 22, 2026: 8 tests passed.
 Development and CI use the same embedded Chroma arrangement. CI must install
 `requirements.txt`, including `chromadb`, but does not need a Chroma service
 container or external embedding credentials.
+
+Baseline on August 5, 2026: 8 storage integration tests passed and 145 tests
+were deselected.
 
 `pytest.ini` adds both the repository root and `graph/` to the test import path
 because production modules currently mix package and top-level imports. This

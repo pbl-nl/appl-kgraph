@@ -37,6 +37,42 @@ query + history
   -> chatbot audit record
 ```
 
+## Implemented Connector Map (2026-08-05)
+
+The connector phase is complete. Each production stage now has one callable,
+typed boundary that can be exercised without the UI or the full end-to-end
+pipeline. Existing public entrypoints remain compatibility wrappers until the
+final integration phase, so this phase does not change user-visible behavior.
+
+| Stage | Callable boundary | Input | Output |
+| --- | --- | --- | --- |
+| Discovery | `discovery.discover_documents()` | `Path` | `list[DocumentRef]` |
+| Parser | `document_parser.parse_document()` | `DocumentRef`, `DocumentParser` | `RawDocument` |
+| Text enrichment | `enrichment.enrich_document()` | `RawDocument`, `Sequence[TextEnricher]` | `EnrichedDocument` |
+| Chunker | `chunker.chunk_document()` | `EnrichedDocument`, `ChunkingConfig` | `list[Chunk]` |
+| Entity/relation extraction | `extraction.extract_graph()` | `Sequence[Chunk]`, `GraphExtractor` | `ExtractionResult` |
+| Graph normalization | `graph_normalization.normalize_graph()` | `ExtractionResult`, `GraphView` | `GraphDelta` |
+| Canonical storage | `storage_connectors.persist_*()` | typed documents, chunks, or `GraphDelta` plus a store | `None` or a named `CanonicalStorageError` |
+| Vector indexing | `storage_connectors.index_*()` | `Sequence[Chunk]` or `GraphDelta` plus an index | `None` or a named `VectorIndexError` |
+| Ingestion orchestration | `ingestion_pipeline.ingest_documents()` | `Sequence[DocumentRef]`, `IngestionPipeline` | `IngestionSummary` |
+| Query analysis | `query_analysis.analyze_query()` / `analyze_query_async()` | query, history, analyzer | `QueryPlan` |
+| Candidate retrieval | `retrieval.retrieve_candidates()` | `QueryPlan`, `CandidateRetriever` | `RetrievalCandidates` |
+| Context construction | `retrieval.build_context()` | `QueryPlan`, `RetrievalCandidates`, `ContextBuilder` | `RetrievedContext` |
+| Optional reranking | `retrieval.rerank_context()` | `RetrievedContext`, optional `Reranker` | `RetrievedContext` |
+| Answer generation | `answer_generation.generate_answer()` / `generate_answer_async()` | query, `RetrievedContext`, history, generator | `AnswerResult` |
+| Chatbot audit | `answer_generation.record_chat_audit()` | `AnswerResult`, project paths, optional recorder | `Path | None` |
+
+Contract decisions:
+
+- `EnrichedDocument` preserves page boundaries and records ordered transformation names.
+- `Chunk` owns stable IDs, document identity, page range, language, filepath, and chunk metadata.
+- `ExtractionResult` may contain duplicate findings; `GraphDelta` is normalized and unique.
+- `GraphDelta` carries upserts and explicit entity/relation deletions.
+- Storage, indexing, model calls, reranking, and audit recording are injected side-effect boundaries.
+- `QueryPlan` owns strategy, mode, keywords, seed entities, history, and relevant settings.
+- `RetrievedContext` contains only typed windows, entities, relations, and chunks.
+- `AnswerResult` owns answer text, exact retrieved context, model metadata, and answer metadata.
+
 ## Section 0: Baseline And Test Harness
 
 Goal: establish a trustworthy baseline before moving behavior.

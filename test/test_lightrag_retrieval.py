@@ -165,6 +165,7 @@ def test_lightrag_retrieve_returns_context_and_keywords(monkeypatch):
                 "top_k_relations": 5,
                 "top_k_chunks": 6,
                 "top_k_chunk_per_entity": 2,
+                "allowed_document_names": None,
             },
         )
     ]

@@ -43,6 +43,8 @@ _DOCS_ROOT = Path(__file__).resolve().parents[1] / _DOCS_ROOT_DIRNAME
 _GRAPH_PANEL_HEIGHT_PX = 650
 _GRAPH_FILTER_TEXT = ""
 _GRAPH_FILTER_MODE = "contains"
+# stores the parameter names from gr.Chatbot.init, so the app can safely check whether a constructor argument
+#  exists before passing it. This avoids crashing on older/newer Gradio releases with slightly different APIs.
 _CHATBOT_INIT_PARAMS = set(inspect.signature(gr.Chatbot.__init__).parameters)
 _APP_CSS = """
 #graph-source-inline .wrap,

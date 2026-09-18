@@ -653,17 +653,37 @@ def _get_lightrag(folder_path: str) -> LightRAG:
     return rag
 
 
+def _message_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        text_value = content.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        nested = content.get("content")
+        if nested is not None:
+            return _message_content_to_text(nested)
+        return str(content)
+    if isinstance(content, (list, tuple)):
+        parts = [_message_content_to_text(item).strip() for item in content]
+        parts = [part for part in parts if part]
+        return "\n".join(parts)
+    return str(content)
+
+
 def _history_to_turns(chat_history: List[dict]) -> List[Tuple[str, str]]:
     turns: List[Tuple[str, str]] = []
     for message in chat_history or []:
         if isinstance(message, dict):
             role = message.get("role", "")
-            content = message.get("content", "")
+            content = _message_content_to_text(message.get("content", ""))
         else:
             role = getattr(message, "role", "")
-            content = getattr(message, "content", "")
+            content = _message_content_to_text(getattr(message, "content", ""))
         if role and content:
-            turns.append((role, content))
+            turns.append((str(role), content))
     return turns
 
 
@@ -672,37 +692,33 @@ def _normalize_chat_history(chat_history: Any) -> List[dict]:
     for message in chat_history or []:
         if isinstance(message, dict):
             role = str(message.get("role", "") or "")
-            content = str(message.get("content", "") or "")
+            content = _message_content_to_text(message.get("content", ""))
         elif isinstance(message, (list, tuple)) and len(message) == 2:
             user_msg, assistant_msg = message
             if user_msg:
-                normalized.append({"role": "user", "content": str(user_msg)})
+                normalized.append({"role": "user", "content": _message_content_to_text(user_msg)})
             if assistant_msg:
-                normalized.append({"role": "assistant", "content": str(assistant_msg)})
+                normalized.append({"role": "assistant", "content": _message_content_to_text(assistant_msg)})
             continue
         else:
             role = str(getattr(message, "role", "") or "")
-            content = str(getattr(message, "content", "") or "")
+            content = _message_content_to_text(getattr(message, "content", ""))
 
         if role and content:
             normalized.append({"role": role, "content": content})
     return normalized
 
 
-def _chat_history_for_component(history: List[dict]) -> Any:
-    if "type" in _CHATBOT_INIT_PARAMS:
-        return history
-    turns: List[Tuple[str, str]] = []
-    pending_user: Optional[str] = None
+def _chat_history_for_component(history: List[dict]) -> List[dict]:
+    # Always emit Gradio messages format to avoid tuple/history incompatibilities
+    # across versions that may expect strict role/content dictionaries.
+    formatted: List[dict] = []
     for message in history:
         role = str(message.get("role", "") or "")
-        content = str(message.get("content", "") or "")
-        if role == "user":
-            pending_user = content
-        elif role == "assistant":
-            turns.append((pending_user or "", content))
-            pending_user = None
-    return turns
+        content = _message_content_to_text(message.get("content", ""))
+        if role and content:
+            formatted.append({"role": role, "content": content})
+    return formatted
 
 
 def _build_chatbot(label: str) -> gr.Chatbot:
@@ -1021,8 +1037,11 @@ async def create_pathrag_response(
     existing_selected_docs: List[str],
 ) -> Tuple[str, List[dict], str]:
     history = _normalize_chat_history(chat_history)
+    question = str(question or "").strip()
     if not active_folder:
         history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
+        return "", _chat_history_for_component(history), ""
+    if not question:
         return "", _chat_history_for_component(history), ""
 
     history.append({"role": "user", "content": question})
@@ -1034,7 +1053,7 @@ async def create_pathrag_response(
             conversation_history=_history_to_turns(history[:-1]),
             allowed_document_names=allowed_docs,
         )
-        history.append({"role": "assistant", "content": result.answer})
+        history.append({"role": "assistant", "content": str(result.answer or "")})
         sources = []
         for index, chunk in enumerate(result.chunk_matches, start=1):
             head = chunk.filename or chunk.document_id or "(unknown doc)"
@@ -1057,8 +1076,11 @@ async def create_lightrag_response(
     existing_selected_docs: List[str],
 ) -> Tuple[str, List[dict], str]:
     history = _normalize_chat_history(chat_history)
+    question = str(question or "").strip()
     if not active_folder:
         history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
+        return "", _chat_history_for_component(history), ""
+    if not question:
         return "", _chat_history_for_component(history), ""
 
     history.append({"role": "user", "content": question})
@@ -1070,7 +1092,7 @@ async def create_lightrag_response(
             conversation_history=_history_to_turns(history[:-1]),
             allowed_document_names=allowed_docs,
         )
-        history.append({"role": "assistant", "content": result.answer})
+        history.append({"role": "assistant", "content": str(result.answer or "")})
         sources = []
         for index, chunk in enumerate(result.all_chunks, start=1):
             source_type = chunk.get("source_type", "unknown")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import html
+import inspect
 import queue
 import tempfile
 import threading
@@ -42,6 +43,9 @@ _DOCS_ROOT = Path(__file__).resolve().parents[1] / _DOCS_ROOT_DIRNAME
 _GRAPH_PANEL_HEIGHT_PX = 650
 _GRAPH_FILTER_TEXT = ""
 _GRAPH_FILTER_MODE = "contains"
+# stores the parameter names from gr.Chatbot.init, so the app can safely check whether a constructor argument
+#  exists before passing it. This avoids crashing on older/newer Gradio releases with slightly different APIs.
+_CHATBOT_INIT_PARAMS = set(inspect.signature(gr.Chatbot.__init__).parameters)
 _APP_CSS = """
 #graph-source-inline .wrap,
 #graph-filter-match-inline .wrap {
@@ -651,18 +655,84 @@ def _get_lightrag(folder_path: str) -> LightRAG:
     return rag
 
 
+def _message_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        text_value = content.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        nested = content.get("content")
+        if nested is not None:
+            return _message_content_to_text(nested)
+        return str(content)
+    if isinstance(content, (list, tuple)):
+        parts = [_message_content_to_text(item).strip() for item in content]
+        parts = [part for part in parts if part]
+        return "\n".join(parts)
+    return str(content)
+
+
 def _history_to_turns(chat_history: List[dict]) -> List[Tuple[str, str]]:
     turns: List[Tuple[str, str]] = []
     for message in chat_history or []:
         if isinstance(message, dict):
             role = message.get("role", "")
-            content = message.get("content", "")
+            content = _message_content_to_text(message.get("content", ""))
         else:
             role = getattr(message, "role", "")
-            content = getattr(message, "content", "")
+            content = _message_content_to_text(getattr(message, "content", ""))
         if role and content:
-            turns.append((role, content))
+            turns.append((str(role), content))
     return turns
+
+
+def _normalize_chat_history(chat_history: Any) -> List[dict]:
+    normalized: List[dict] = []
+    for message in chat_history or []:
+        if isinstance(message, dict):
+            role = str(message.get("role", "") or "")
+            content = _message_content_to_text(message.get("content", ""))
+        elif isinstance(message, (list, tuple)) and len(message) == 2:
+            user_msg, assistant_msg = message
+            if user_msg:
+                normalized.append({"role": "user", "content": _message_content_to_text(user_msg)})
+            if assistant_msg:
+                normalized.append({"role": "assistant", "content": _message_content_to_text(assistant_msg)})
+            continue
+        else:
+            role = str(getattr(message, "role", "") or "")
+            content = _message_content_to_text(getattr(message, "content", ""))
+
+        if role and content:
+            normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _chat_history_for_component(history: List[dict]) -> List[dict]:
+    # Always emit Gradio messages format to avoid tuple/history incompatibilities
+    # across versions that may expect strict role/content dictionaries.
+    formatted: List[dict] = []
+    for message in history:
+        role = str(message.get("role", "") or "")
+        content = _message_content_to_text(message.get("content", ""))
+        if role and content:
+            formatted.append({"role": role, "content": content})
+    return formatted
+
+
+def _build_chatbot(label: str) -> gr.Chatbot:
+    kwargs: dict[str, Any] = {
+        "label": label,
+        "height": int(_GRAPH_PANEL_HEIGHT_PX / 2),
+    }
+    if "type" in _CHATBOT_INIT_PARAMS:
+        kwargs["type"] = "messages"
+    if "resizable" in _CHATBOT_INIT_PARAMS:
+        kwargs["resizable"] = True
+    return gr.Chatbot(**kwargs)
 
 
 def _dropdown_choices() -> List[Tuple[str, str]]:
@@ -968,12 +1038,14 @@ async def create_pathrag_response(
     existing_action_mode: str,
     existing_selected_docs: List[str],
 ) -> Tuple[str, List[dict], str]:
+    history = _normalize_chat_history(chat_history)
+    question = str(question or "").strip()
     if not active_folder:
-        chat_history = list(chat_history or [])
-        chat_history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
-        return "", chat_history, ""
+        history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
+        return "", _chat_history_for_component(history), ""
+    if not question:
+        return "", _chat_history_for_component(history), ""
 
-    history = list(chat_history or [])
     history.append({"role": "user", "content": question})
     try:
         rag = _get_pathrag(active_folder)
@@ -983,17 +1055,17 @@ async def create_pathrag_response(
             conversation_history=_history_to_turns(history[:-1]),
             allowed_document_names=allowed_docs,
         )
-        history.append({"role": "assistant", "content": result.answer})
+        history.append({"role": "assistant", "content": str(result.answer or "")})
         sources = []
         for index, chunk in enumerate(result.chunk_matches, start=1):
             head = chunk.filename or chunk.document_id or "(unknown doc)"
             sources.append(f"{index}. {head} (score={chunk.score:.3f})")
             sources.append(chunk.text)
             sources.append("-" * 46)
-        return "", history, "\n".join(sources)
+        return "", _chat_history_for_component(history), "\n".join(sources)
     except Exception as exc:
         history.append({"role": "assistant", "content": f"PathRAG error: {exc}"})
-        return "", history, f"PathRAG error: {exc}"
+        return "", _chat_history_for_component(history), f"PathRAG error: {exc}"
 
 
 async def create_lightrag_response(
@@ -1005,12 +1077,14 @@ async def create_lightrag_response(
     existing_action_mode: str,
     existing_selected_docs: List[str],
 ) -> Tuple[str, List[dict], str]:
+    history = _normalize_chat_history(chat_history)
+    question = str(question or "").strip()
     if not active_folder:
-        chat_history = list(chat_history or [])
-        chat_history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
-        return "", chat_history, ""
+        history.append({"role": "assistant", "content": "Select and ingest a document folder first."})
+        return "", _chat_history_for_component(history), ""
+    if not question:
+        return "", _chat_history_for_component(history), ""
 
-    history = list(chat_history or [])
     history.append({"role": "user", "content": question})
     try:
         rag = _get_lightrag(active_folder)
@@ -1020,7 +1094,7 @@ async def create_lightrag_response(
             conversation_history=_history_to_turns(history[:-1]),
             allowed_document_names=allowed_docs,
         )
-        history.append({"role": "assistant", "content": result.answer})
+        history.append({"role": "assistant", "content": str(result.answer or "")})
         sources = []
         for index, chunk in enumerate(result.all_chunks, start=1):
             source_type = chunk.get("source_type", "unknown")
@@ -1030,13 +1104,13 @@ async def create_lightrag_response(
             sources.append(line)
             sources.append(chunk.get("text", ""))
             sources.append("-" * 46)
-        return "", history, "\n".join(sources)
+        return "", _chat_history_for_component(history), "\n".join(sources)
     except Exception as exc:
         history.append({"role": "assistant", "content": f"LightRAG error: {exc}"})
-        return "", history, f"LightRAG error: {exc}"
+        return "", _chat_history_for_component(history), f"LightRAG error: {exc}"
 
 
-with gr.Blocks(css=_APP_CSS) as demo:
+with gr.Blocks() as demo:
     gr.Markdown("## Interactive Hybrid RAG")
 
     active_folder = gr.State("")
@@ -1089,12 +1163,7 @@ with gr.Blocks(css=_APP_CSS) as demo:
         with gr.Column(scale=1):
             with gr.Tabs():
                 with gr.Tab("PathRAG"):
-                    pathrag_chatbot = gr.Chatbot(
-                        type="messages",
-                        label="PathRAG Chat History",
-                        height=int(_GRAPH_PANEL_HEIGHT_PX / 2),
-                        resizable=True
-                    )
+                    pathrag_chatbot = _build_chatbot("PathRAG Chat History")
                     pathrag_sources = gr.Textbox(label="PathRAG sources", interactive=False, lines=14)
                     with gr.Row():
                         pathrag_msg_input = gr.Textbox(
@@ -1108,12 +1177,7 @@ with gr.Blocks(css=_APP_CSS) as demo:
                             scale=3,
                         )
                 with gr.Tab("LightRAG"):
-                    lightrag_chatbot = gr.Chatbot(
-                        type="messages",
-                        label="LightRAG Chat History",
-                        height=int(_GRAPH_PANEL_HEIGHT_PX / 2),
-                        resizable=True
-                    )
+                    lightrag_chatbot = _build_chatbot("LightRAG Chat History")
                     lightrag_sources = gr.Textbox(label="LightRAG sources", interactive=False, lines=14)
                     with gr.Row():
                         lightrag_msg_input = gr.Textbox(
@@ -1251,4 +1315,7 @@ with gr.Blocks(css=_APP_CSS) as demo:
 
 if __name__ == "__main__":
     demo.queue()
-    demo.launch(inbrowser=True, pwa=True)
+    launch_kwargs: dict[str, Any] = {"inbrowser": True, "pwa": True}
+    if "css" in set(inspect.signature(demo.launch).parameters):
+        launch_kwargs["css"] = _APP_CSS
+    demo.launch(**launch_kwargs)

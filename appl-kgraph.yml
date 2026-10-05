@@ -354,4 +354,3 @@ dependencies:
       - docx2pdf==0.1.8
       - flashrank==0.2.10
       - pywin32==312
-prefix: F:\User\troosts\conda\envs\appl-kgraph

@@ -9,6 +9,7 @@ os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 
+from graph.discovery import discover_documents
 from graph.project_paths import list_document_paths, resolve_project_paths
 
 
@@ -44,3 +45,20 @@ def test_list_document_paths_excludes_project_artifacts(tmp_path):
     paths = list_document_paths(documents_root)
 
     assert [path.name for path in paths] == ["a.txt", "b.md"]
+
+
+def test_list_document_paths_delegates_typed_discovery(tmp_path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (tmp_path / "report.txt").write_text("root", encoding="utf-8")
+    (nested / "REPORT.TXT").write_text("nested", encoding="utf-8")
+    (tmp_path / "~$draft.docx").write_text("temporary", encoding="utf-8")
+
+    documents = discover_documents(tmp_path, valid_extensions=[".txt", ".docx"])
+    paths = list_document_paths(tmp_path, valid_extensions=[".txt", ".docx"])
+
+    assert paths == [document.path for document in documents]
+    assert [path.relative_to(tmp_path.resolve()) for path in paths] == [
+        Path("nested/REPORT.TXT"),
+        Path("report.txt"),
+    ]

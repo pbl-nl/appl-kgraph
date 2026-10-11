@@ -97,8 +97,8 @@ def test_ingest_documents_composes_typed_stages_and_returns_summary():
     assert [name for name, _ in calls] == [
         "parse",
         "enrich",
-        "persist_document",
         "chunk",
+        "persist_document",
         "persist_chunks",
         "extract",
         "normalize",
@@ -106,7 +106,7 @@ def test_ingest_documents_composes_typed_stages_and_returns_summary():
         "index_chunks",
         "index_graph",
     ]
-    assert calls[2][1] == (raw, enriched)
+    assert calls[3][1] == (raw, enriched)
     assert calls[4][1] == (chunks,)
     assert calls[5][1] == (chunks,)
     assert calls[6][1] == (extraction,)
@@ -155,3 +155,13 @@ def test_ingest_documents_rejects_duplicate_source_paths():
         ingest_documents([document, document], pipeline)
 
     assert calls == []
+
+
+def test_duplicate_chunks_are_rejected_before_any_storage_write():
+    from dataclasses import replace
+    document = DocumentRef(path=Path("report.txt"))
+    pipeline, calls, _, _, chunks, *_ = _pipeline(document)
+    pipeline = replace(pipeline, chunk=lambda _: [chunks[0], chunks[0]])
+    with pytest.raises(IngestionStageError, match="unique chunk identifiers"):
+        ingest_documents([document], pipeline)
+    assert all(not name.startswith(("persist", "index")) for name, _ in calls)

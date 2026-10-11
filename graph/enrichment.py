@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence, Tuple
 
@@ -53,7 +54,7 @@ def enrich_document(
         raise TypeError("raw must be a RawDocument")
 
     pages: DocumentPages = raw.pages
-    metadata: Mapping[str, Any] = raw.metadata
+    metadata: Mapping[str, Any] = deepcopy(raw.metadata)
     transformations = []
 
     for enricher in enrichers:

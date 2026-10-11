@@ -29,6 +29,9 @@ class IngestionPipeline:
     persist_graph: Callable[[GraphDelta], None]
     index_chunks: Callable[[Sequence[Chunk]], None]
     index_graph: Callable[[GraphDelta], None]
+    transform_graph: Callable[[GraphDelta], GraphDelta] | None = None
+    diagnostics: Callable[[DocumentRef, ExtractionResult], None] | None = None
+    finalize: Callable[[RawDocument], None] | None = None
 
 
 class IngestionStageError(RuntimeError):
@@ -78,14 +81,6 @@ def ingest_documents(
         if enriched.raw.doc_id != raw.doc_id:
             _invalid_output("enrich", document, "matching document identity")
 
-        _run_stage(
-            "persist_document",
-            document,
-            pipeline.persist_document,
-            raw,
-            enriched,
-            progress=progress,
-        )
         chunks = _run_stage(
             "chunk",
             document,
@@ -94,6 +89,14 @@ def ingest_documents(
             progress=progress,
         )
         chunks = _validated_chunks(chunks, raw, document)
+        _run_stage(
+            "persist_document",
+            document,
+            pipeline.persist_document,
+            raw,
+            enriched,
+            progress=progress,
+        )
         _run_stage(
             "persist_chunks",
             document,
@@ -121,6 +124,11 @@ def ingest_documents(
         if not isinstance(delta, GraphDelta):
             _invalid_output("normalize", document, "GraphDelta")
 
+        if pipeline.transform_graph is not None:
+            delta = _run_stage("transform_graph", document, pipeline.transform_graph, delta, progress=progress)
+            if not isinstance(delta, GraphDelta):
+                _invalid_output("transform_graph", document, "GraphDelta")
+
         _run_stage(
             "persist_graph",
             document,
@@ -142,6 +150,10 @@ def ingest_documents(
             delta,
             progress=progress,
         )
+        if pipeline.diagnostics is not None:
+            _run_stage("diagnostics", document, pipeline.diagnostics, document, extraction, progress=progress)
+        if pipeline.finalize is not None:
+            _run_stage("finalize", document, pipeline.finalize, raw, progress=progress)
         completed.append(
             IngestedDocument(
                 ref=document,
@@ -189,6 +201,8 @@ def _validated_chunks(chunks, raw, document):
     batch = tuple(chunks)
     if not all(isinstance(chunk, Chunk) for chunk in batch):
         _invalid_output("chunk", document, "only Chunk objects")
+    if len({chunk.chunk_uuid for chunk in batch}) != len(batch):
+        _invalid_output("chunk", document, "unique chunk identifiers")
     if any(chunk.doc_id != raw.doc_id for chunk in batch):
         _invalid_output("chunk", document, "chunks with matching document identity")
     return batch

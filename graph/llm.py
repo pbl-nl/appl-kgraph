@@ -119,6 +119,11 @@ class Chat:
     """
     def __init__(self):
         prov = settings.provider.provider
+        provider = settings.provider
+        if prov == "azure" and not (provider.azure_api_key and provider.azure_endpoint and provider.azure_llm_deployment):
+            raise RuntimeError("Set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_LLM_DEPLOYMENT_NAME.")
+        if prov == "openai" and not (provider.openai_api_key and provider.openai_llm_model):
+            raise RuntimeError("Set OPENAI_API_KEY and OPENAI_LLM_MODEL.")
 
         if prov == "azure":
             if AzureOpenAI is None:

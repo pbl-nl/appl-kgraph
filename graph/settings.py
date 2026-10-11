@@ -186,27 +186,8 @@ def load_settings() -> Settings:
         azure_embeddings_deployment=ut.env_str("AZURE_OPENAI_EMB_DEPLOYMENT_NAME"),
     )
 
-    if provider.provider == "openai":
-        if not provider.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai.")
-        if not provider.openai_llm_model:
-            raise RuntimeError("OPENAI_LLM_MODEL is required when LLM_PROVIDER=openai.")
-        if not provider.openai_embeddings_model:
-            raise RuntimeError("OPENAI_EMBEDDINGS_MODEL is required when LLM_PROVIDER=openai.")
-    else:
-        missing = []
-        if not provider.azure_api_key:
-            missing.append("AZURE_OPENAI_API_KEY")
-        if not provider.azure_endpoint:
-            missing.append("AZURE_OPENAI_ENDPOINT")
-        if not provider.azure_llm_deployment:
-            missing.append("AZURE_OPENAI_LLM_DEPLOYMENT_NAME")
-        if not provider.azure_embeddings_deployment:
-            missing.append("AZURE_OPENAI_EMB_DEPLOYMENT_NAME")
-        if missing:
-            raise RuntimeError(
-                f"When LLM_PROVIDER=azure, set required variables: {', '.join(missing)}"
-            )
+    # Pure document stages may load settings without any model credentials.
+    # Model adapters validate their own credentials when instantiated.
 
     chat = ChatGenerationSettings(
         temperature=ut.env_float("CHAT_TEMPERATURE", 0.0),

@@ -1208,6 +1208,7 @@ class Storage:
             for index in range(size):
                 metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
                 matches.append({
+                    **metadata,
                     "chunk_uuid": ids[index] if index < len(ids) else "",
                     "doc_id": metadata.get("doc_id", ""),
                     "filename": metadata.get("filename", ""),

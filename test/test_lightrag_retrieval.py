@@ -1,227 +1,142 @@
-import os
-import sys
-from pathlib import Path
-from types import SimpleNamespace
+from dataclasses import replace
+import json
 
 import pytest
 
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
-sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
-
-import graph.lightrag as lightrag
+from test.rag_fixtures import corpus as corpus_fixture
+from test.rag_fixtures import configure_rag, observe_stages
+from test.production_fixtures import DeterministicChat
+from schemas import AnswerResult
+import lightrag
 
 
-class _ChatFake:
-    def __init__(self, answer):
-        self.answer = answer
-        self.calls = []
-
-    async def generate(self, prompt, *, max_tokens, temperature):
-        self.calls.append((prompt, max_tokens, temperature))
-        return self.answer
+corpus = corpus_fixture
+pytestmark = pytest.mark.storage_integration
 
 
-def _retrieval_settings():
-    return SimpleNamespace(
-        history_turns=3,
-        light_mode="hybrid",
-        entity_top_k=4,
-        relation_top_k=5,
-        chunk_top_k=6,
-        top_k_chunk_per_entity=2,
-        llm_max_tokens=432,
-        llm_temperature=0.15,
-    )
+def keywords(monkeypatch, value):
+    async def extract(chat, query, history, turns, **kwargs):
+        return value
+
+    monkeypatch.setattr(lightrag, "extract_keywords", extract)
 
 
-def _configure_retrieval_fakes(
-    monkeypatch,
-    *,
-    keywords,
-    contexts=((), (), ()),
-    answer="Grounded answer",
+@pytest.mark.parametrize("mode", ["local", "global", "hybrid", "mix", "naive"])
+def test_lightrag_public_entrypoint_uses_production_connectors(
+    corpus, monkeypatch, mode
 ):
-    storage = object()
-    keyword_chat = _ChatFake("unused keyword response")
-    answer_chat = _ChatFake(answer)
-    state = SimpleNamespace(
-        adapter_initialization=[],
-        chat_initialization=[],
-        keyword_calls=[],
-        context_calls=[],
-        prompt_calls=[],
-        storage=storage,
-        keyword_chat=keyword_chat,
-        answer_chat=answer_chat,
-    )
-
-    def make_adapter(**kwargs):
-        state.adapter_initialization.append(kwargs)
-        return storage
-
-    def make_chat(system_prompt=None):
-        state.chat_initialization.append(system_prompt)
-        if len(state.chat_initialization) == 1:
-            return keyword_chat
-        return answer_chat
-
-    async def fake_extract_keywords(chat, query, history, history_turns):
-        state.keyword_calls.append((chat, query, history, history_turns))
-        return keywords
-
-    def fake_build_context(adapter, query, hl_keywords, ll_keywords, **settings):
-        state.context_calls.append(
-            (adapter, query, hl_keywords, ll_keywords, settings)
-        )
-        return tuple(list(items) for items in contexts)
-
-    def fake_lightrag_prompt(**kwargs):
-        state.prompt_calls.append(kwargs)
-        return "formatted LightRAG system prompt"
-
-    monkeypatch.setattr(lightrag, "StorageAdapter", make_adapter)
-    monkeypatch.setattr(lightrag, "RetrieveChat", make_chat)
-    monkeypatch.setattr(lightrag, "extract_keywords", fake_extract_keywords)
-    monkeypatch.setattr(lightrag, "build_context", fake_build_context)
-    monkeypatch.setattr(lightrag, "lightrag_prompt", fake_lightrag_prompt)
-    monkeypatch.setattr(lightrag, "set_logger", lambda log_file: None)
+    configure_rag(lightrag, monkeypatch)
     monkeypatch.setattr(
         lightrag,
         "settings",
-        SimpleNamespace(
-            retrieval=_retrieval_settings(),
-            logging=SimpleNamespace(audit_enabled=False),
+        replace(
+            lightrag.settings,
+            retrieval=replace(lightrag.settings.retrieval, light_mode=mode),
         ),
     )
-    monkeypatch.setattr(lightrag, "PROMPTS", {"fail_response": "No keywords found"})
-    return state
-
-
-def test_lightrag_retrieve_returns_context_and_keywords(monkeypatch):
-    entities = [
-        {
-            "id": "1",
-            "entity": "Alpha",
-            "type": "Organization",
-            "description": "Primary entity",
-        }
-    ]
-    relations = [
-        {
-            "id": "1",
-            "entity1": "Alpha",
-            "entity2": "Beta",
-            "description": "Works with",
-        }
-    ]
-    chunks = [
-        {
-            "id": "chunk-1",
-            "text": "Supporting text",
-            "source_type": "entity",
-        }
-    ]
-    history = [("user", "Earlier question"), ("assistant", "Earlier answer")]
-    state = _configure_retrieval_fakes(
-        monkeypatch,
-        keywords=(["partnership"], ["Alpha", "Beta"]),
-        contexts=(entities, relations, chunks),
-    )
-
-    rag = lightrag.LightRAG(storage_paths="storage-config", system_prompt="initial")
-    result = rag.retrieve("How are Alpha and Beta related?", history)
-
-    assert result == lightrag.RetrievalResult(
-        answer="Grounded answer",
-        entities_context=entities,
-        relations_context=relations,
-        all_chunks=chunks,
-        hl_keywords=["partnership"],
-        ll_keywords=["Alpha", "Beta"],
-    )
-    assert state.adapter_initialization == [
-        {"paths": "storage-config", "graph_pickle_path": None}
-    ]
-    assert state.keyword_calls == [
-        (
-            state.keyword_chat,
-            "How are Alpha and Beta related?",
-            history,
-            3,
+    keywords(monkeypatch, (["partnership"], ["Alpha"]))
+    calls = observe_stages(lightrag, monkeypatch)
+    rag = lightrag.LightRAG(project_paths=corpus)
+    try:
+        result = rag.retrieve("How are Alpha and Beta related?", [("user", "Earlier")])
+        assert isinstance(result, AnswerResult) and result.answer == "Grounded answer"
+        assert result.context.query_plan.mode == mode
+        assert result.context.chunks
+        assert len({chunk.chunk_uuid for chunk in result.context.chunks}) == len(
+            result.context.chunks
         )
-    ]
-    assert state.context_calls == [
-        (
-            state.storage,
-            "How are Alpha and Beta related?",
-            ["partnership"],
-            ["Alpha", "Beta"],
-            {
-                "retrieval_mode": "hybrid",
-                "top_k_entities": 4,
-                "top_k_relations": 5,
-                "top_k_chunks": 6,
-                "top_k_chunk_per_entity": 2,
-                "allowed_document_names": None,
-            },
+        assert calls == [
+            "retrieve_candidates",
+            "build_context",
+            "rerank_context",
+            "generate_answer",
+            "audit",
+        ]
+        system_prompt, query, _, _ = DeterministicChat.calls[0]
+        assert query == "How are Alpha and Beta related?"
+        assert "Earlier" in system_prompt
+        audit = json.loads(
+            next(corpus.audit_logs_dir.glob("*lightrag*.json")).read_text()
         )
-    ]
-    assert state.prompt_calls == [
-        {
-            "entities_context": entities,
-            "relations_context": relations,
-            "all_chunks": chunks,
-            "history": history,
-        }
-    ]
-    assert state.chat_initialization == [
-        "initial",
-        "formatted LightRAG system prompt",
-    ]
-    assert state.answer_chat.calls == [
-        ("How are Alpha and Beta related?", 432, 0.15)
-    ]
+        assert [row["chunk_uuid"] for row in audit["retrieved_chunks"]] == [
+            chunk.chunk_uuid for chunk in result.context.chunks
+        ]
+    finally:
+        rag.close()
 
 
 @pytest.mark.parametrize(
-    ("keywords", "expected_mode"),
-    [
-        (([], ["Alpha"]), "local"),
-        ((["partnership"], []), "global"),
-    ],
+    "value,mode", [(([], ["Alpha"]), "local"), ((["partnership"], []), "global")]
 )
-def test_lightrag_retrieve_falls_back_when_one_keyword_class_is_empty(
-    monkeypatch,
-    keywords,
-    expected_mode,
-):
-    state = _configure_retrieval_fakes(monkeypatch, keywords=keywords)
-
-    result = lightrag.LightRAG().retrieve("Question")
-
-    assert result.hl_keywords == keywords[0]
-    assert result.ll_keywords == keywords[1]
-    assert state.context_calls[0][4]["retrieval_mode"] == expected_mode
-    assert result.answer == "Grounded answer"
-
-
-def test_lightrag_retrieve_returns_failure_result_for_empty_keywords(monkeypatch):
-    state = _configure_retrieval_fakes(monkeypatch, keywords=([], []))
-
-    result = lightrag.LightRAG().retrieve("Unknown topic")
-
-    assert result == lightrag.RetrievalResult(
-        answer="No keywords found",
-        entities_context=[],
-        relations_context=[],
-        all_chunks=[],
-        hl_keywords=[],
-        ll_keywords=[],
+def test_keyword_fallback(corpus, monkeypatch, value, mode):
+    configure_rag(lightrag, monkeypatch)
+    keywords(monkeypatch, value)
+    monkeypatch.setattr(
+        lightrag,
+        "settings",
+        replace(
+            lightrag.settings,
+            retrieval=replace(lightrag.settings.retrieval, light_mode="hybrid"),
+        ),
     )
-    assert state.context_calls == []
-    assert state.prompt_calls == []
-    assert state.chat_initialization == [None]
-    assert state.answer_chat.calls == []
+    rag = lightrag.LightRAG(project_paths=corpus)
+    try:
+        assert rag.retrieve("Alpha").context.query_plan.mode == mode
+    finally:
+        rag.close()
+
+
+def test_empty_keywords_avoids_answer_model_but_naive_still_retrieves(
+    corpus, monkeypatch
+):
+    configure_rag(lightrag, monkeypatch)
+    keywords(monkeypatch, ([], []))
+    rag = lightrag.LightRAG(project_paths=corpus)
+    try:
+        result = rag.retrieve("Unknown")
+        assert (
+            result.answer == lightrag.PROMPTS["fail_response"]
+            and result.context.chunks == []
+        )
+        assert DeterministicChat.calls == []
+        monkeypatch.setattr(
+            lightrag,
+            "settings",
+            replace(
+                lightrag.settings,
+                retrieval=replace(lightrag.settings.retrieval, light_mode="naive"),
+            ),
+        )
+        assert rag.retrieve("Alpha").context.chunks
+    finally:
+        rag.close()
+
+
+def test_selection_and_reranking_use_final_context(corpus, monkeypatch):
+    configure_rag(lightrag, monkeypatch)
+    keywords(monkeypatch, (["partnership"], ["Alpha"]))
+    monkeypatch.setattr(
+        lightrag,
+        "settings",
+        replace(
+            lightrag.settings,
+            retrieval=replace(
+                lightrag.settings.retrieval, enable_rerank=True, chunk_top_k=1
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        lightrag,
+        "rerank",
+        lambda query, docs, top_n, **kwargs: list(reversed(range(len(docs)))),
+    )
+    rag = lightrag.LightRAG(project_paths=corpus)
+    try:
+        result = rag.retrieve("Alpha", allowed_document_names=["a.txt"])
+        assert (
+            len(result.context.chunks) == 1
+            and result.context.chunks[0].filename == "a.txt"
+        )
+        assert result.context.chunks[0].text in DeterministicChat.calls[0][0]
+    finally:
+        rag.close()

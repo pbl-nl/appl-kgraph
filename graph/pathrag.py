@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, replace
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from collections import defaultdict
@@ -13,7 +13,7 @@ from pathlib import Path
 import networkx as nx
 import tiktoken
 
-from settings import settings
+from settings import settings, RetrievalSettings
 from db_storage import Storage
 from db_storage import StoragePaths
 from llm import Chat
@@ -21,7 +21,11 @@ from prompts import PROMPTS
 from logging_utils import configure_file_logger
 from graph_pickle import load_or_build_graph_snapshot
 from project_paths import ProjectPaths
-from query_logging import write_audit_log
+from answer_generation import AsyncTextAnswerGenerator, generate_answer_async, record_chat_audit
+from query_analysis import PassThroughQueryAnalyzer, analyze_query
+import retrieval as stages
+from schemas import AnswerResult, retrieval_candidates_from_legacy
+from context_serialization import context_from_candidates
 
 
 LOGGER = logging.getLogger("PathRAG")
@@ -72,27 +76,27 @@ def _chunk_matches_allowed(chunk: "ChunkMatch", allowed_documents: Optional[set[
 # Verbosity helper
 # ---------------------------------------------------------------------------
 
-def render_full_context(result: RetrievalResult) -> str:
+def render_full_context(result: AnswerResult) -> str:
     lines = []
 
     # 1) Entities
     lines.append("\n== ENTITY MATCHES ==")
-    if result.entity_matches:
-        for i, m in enumerate(result.entity_matches, 1):
+    if result.context.entities:
+        for i, m in enumerate(result.context.entities, 1):
             lines.append(
                 f"{i}. {m.name} [{m.type or 'unknown'}] "
-                f"(score={m.score:.3f})\n   {m.description or '(no description)'}"
+                f"(score={m.metadata.get('score', 0.0):.3f})\n   {m.description or '(no description)'}"
             )
     else:
         lines.append("(none)")
 
     # 2) Relations
     lines.append("\n== RELATION MATCHES ==")
-    if result.relation_matches:
-        for i, r in enumerate(result.relation_matches, 1):
+    if result.context.relations:
+        for i, r in enumerate(result.context.relations, 1):
             kw = f" | keywords: {r.keywords}" if r.keywords else ""
             lines.append(
-                f"{i}. {r.source_name} ↔ {r.target_name} (score={r.score:.3f})"
+                f"{i}. {r.source_name} ↔ {r.target_name} (score={r.metadata.get('score', 0.0):.3f})"
                 f"\n   {r.description or '(no description)'}{kw}"
             )
     else:
@@ -100,12 +104,12 @@ def render_full_context(result: RetrievalResult) -> str:
 
     # 3) Chunks
     lines.append("\n== CHUNK MATCHES ==")
-    if result.chunk_matches:
-        for i, c in enumerate(result.chunk_matches, 1):
-            head = f"{c.filename or c.document_id or '(unknown doc)'}"
+    if result.context.chunks:
+        for i, c in enumerate(result.context.chunks, 1):
+            head = f"{c.filename or c.doc_id or '(unknown doc)'}"
             lines.append(
-                f"{i}. {head} (score={c.score:.3f})"
-                f"\n   chunk_uuid={c.chunk_uuid} doc_id={c.document_id}"
+                f"{i}. {head} (score={c.metadata.get('score', 0.0):.3f})"
+                f"\n   chunk_uuid={c.chunk_uuid} doc_id={c.doc_id}"
             )
             # If you want full chunk text printed, uncomment below:
             # lines.append("   --- chunk text ---")
@@ -115,8 +119,8 @@ def render_full_context(result: RetrievalResult) -> str:
 
     # 4) Context windows (graph + chunks)
     lines.append("\n== CONTEXT WINDOWS ==")
-    if result.context_windows:
-        for w in result.context_windows:
+    if result.context.context_windows:
+        for w in result.context.context_windows:
             lines.append(f"[{w.label}] score={w.score:.3f}")
             lines.append(w.text)
             lines.append("")  # blank line
@@ -329,7 +333,9 @@ def build_path_windows(
         text = _format_path_context(graph, path)
         text = truncate_by_tokens(text, max_tokens, model)
         label = f"{label_prefix}path::{path[0]}→{path[-1]} (len={len(path)-1})"
-        windows.append(ContextWindow(label=label, text=text, score=score))
+        windows.append(ContextWindow(label=label, text=text, score=score, source_refs=tuple(dict.fromkeys(
+            source for name in path for source in graph.nodes[name].get("chunk_uuids", ())
+        ))))
         taken_pairs.add(pair)
     return windows
 
@@ -338,7 +344,7 @@ def render_history(history: Optional[List[Tuple[str, str]]], *, max_turns: int =
     history: list of (role, text) pairs; roles "user" or "assistant".
     Returns a compact plaintext block for the template.
     """
-    if not history:
+    if not history or max_turns <= 0:
         return ""
     # keep only the last N turns
     tail = history[-max_turns:]
@@ -356,56 +362,9 @@ def render_history(history: Optional[List[Tuple[str, str]]], *, max_turns: int =
 # Data models
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class EntityMatch:
-    """Represents a node match returned from the entity vector index."""
+from schemas import EntityCandidate as EntityMatch, RelationCandidate as RelationMatch
+from schemas import ChunkCandidate as ChunkMatch, ContextWindow
 
-    name: str
-    type: Optional[str]
-    description: str
-    score: float
-
-
-@dataclass(frozen=True)
-class RelationMatch:
-    """Represents an edge match returned from the relation vector index."""
-
-    source_name: str
-    target_name: str
-    description: str
-    keywords: str
-    score: float
-
-
-@dataclass(frozen=True)
-class ChunkMatch:
-    """Represents a chunk retrieved from the chunk vector index."""
-
-    chunk_uuid: str
-    document_id: str
-    filename: str
-    text: str
-    score: float
-
-
-@dataclass(frozen=True)
-class ContextWindow:
-    """A context window summarising graph and chunk evidence."""
-
-    label: str
-    text: str
-    score: float
-
-
-@dataclass(frozen=True)
-class RetrievalResult:
-    """Structured output returned by :class:`PathRAG`."""
-
-    answer: str
-    context_windows: List[ContextWindow]
-    entity_matches: List[EntityMatch]
-    relation_matches: List[RelationMatch]
-    chunk_matches: List[ChunkMatch]
 
 @dataclass(frozen=True)
 class GraphSnapshot:
@@ -492,6 +451,7 @@ class StorageAdapter:
                     type=metadata.get("type"),
                     description=metadata.get("description", ""),
                     score=float(metadata.get("score", 0.0) or 0.0),
+                    metadata=dict(metadata),
                 )
             )
         return matches
@@ -513,6 +473,7 @@ class StorageAdapter:
                     description=metadata.get("description", ""),
                     keywords=metadata.get("keywords", ""),
                     score=float(metadata.get("score", 0.0) or 0.0),
+                    metadata=dict(metadata),
                 )
             )
         return matches
@@ -531,6 +492,7 @@ class StorageAdapter:
                     filename=str(metadata.get("filename", "")),
                     text=str(metadata.get("text", "")),
                     score=float(metadata.get("score", 0.0) or 0.0),
+                    metadata=dict(metadata),
                 )
             )
         return matches
@@ -660,7 +622,9 @@ def build_graph_windows(
     for seed, text in descriptions:
         trimmed = truncate_by_tokens(text, max_tokens, model)
         windows.append(
-            ContextWindow(label=f"{label_prefix}graph::{seed}", text=trimmed, score=score_by_seed.get(seed, 1.0))
+            ContextWindow(label=f"{label_prefix}graph::{seed}", text=trimmed, score=score_by_seed.get(seed, 1.0),
+                          source_refs=tuple(dict.fromkeys(source for _, row in nx.ego_graph(adapter.graph, seed, radius=depth).nodes(data=True)
+                                                         for source in row.get("chunk_uuids", ()))))
         )
         if len(windows) >= max_windows:
             break
@@ -679,79 +643,27 @@ def build_chunk_windows(
     for chunk in chunks[:max_windows]:
         snippet = truncate_by_tokens(chunk.text, max_tokens, model)
         label = f"{label_prefix}chunk::{chunk.filename or chunk.document_id}"
-        windows.append(ContextWindow(label=label, text=snippet, score=chunk.score))
+        windows.append(ContextWindow(label=label, text=snippet, score=chunk.score, source_refs=(chunk.chunk_uuid,)))
     return windows
 
 
-def merge_windows(graph_windows: Sequence[ContextWindow], chunk_windows: Sequence[ContextWindow]) -> List[ContextWindow]:
-    return list(graph_windows) + list(chunk_windows)
-
-
-def format_windows_for_prompt(windows: Iterable[ContextWindow]) -> str:
-    blocks = [f"[{window.label}]\n{window.text}" for window in windows]
-    return join_non_empty(blocks, delimiter="\n\n")
-
-
-def build_context_for_prompt(
-    context_windows: Sequence["ContextWindow"],
-    entity_matches: Sequence["EntityMatch"],
-    relation_matches: Sequence["RelationMatch"],
-    chunk_matches: Sequence["ChunkMatch"],
-) -> str:
-    """
-    Build a JSON payload summarising context windows and raw matches for the prompt.
-    """
-    payload: Dict[str, Any] = {
-        "context_windows": [
-            {
-                "label": w.label,
-                "text": w.text,
-                "score": w.score,
-            }
-            for w in context_windows
-        ],
-        "entity_matches": [
-            {
-                "name": e.name,
-                "type": e.type,
-                "description": e.description,
-                "score": e.score,
-            }
-            for e in entity_matches
-        ],
-        "relation_matches": [
-            {
-                "source_name": r.source_name,
-                "target_name": r.target_name,
-                "description": r.description,
-                "keywords": r.keywords,
-                "score": r.score,
-            }
-            for r in relation_matches
-        ],
-        "chunk_matches": [
-            {
-                "chunk_uuid": c.chunk_uuid,
-                "document_id": c.document_id,
-                "filename": c.filename,
-                "text": c.text,
-                "score": c.score,
-            }
-            for c in chunk_matches
-        ],
+def build_context_for_prompt(context_windows, entity_matches, relation_matches, chunk_matches) -> str:
+    payload = {
+        "context_windows": [{"label": item.label, "text": item.text, "score": item.score} for item in context_windows],
+        "entity_matches": [{"name": item.name, "type": item.type, "description": item.description,
+                            "score": item.metadata.get("score", 0.0)} for item in entity_matches],
+        "relation_matches": [{"source_name": item.source_name, "target_name": item.target_name,
+                              "description": item.description, "keywords": item.keywords,
+                              "score": item.metadata.get("score", 0.0)} for item in relation_matches],
+        "chunk_matches": [{"chunk_uuid": item.chunk_uuid, "document_id": item.doc_id,
+                           "filename": item.filename, "text": item.text,
+                           "score": item.metadata.get("score", 0.0)} for item in chunk_matches],
     }
     return json.dumps(payload, ensure_ascii=False)
 
 # ---------------------------------------------------------------------------
 # Prompt template
 # ---------------------------------------------------------------------------
-
-# !! lightweight placeholder for testing, replace with imported PROMPT when finished.
-RAG_PROMPT = (
-    "You are a helpful assistant. Use the supplied context to answer the question."
-    "\n\nContext:\n{context}\n\nQuestion: {question}\nAnswer in Markdown."
-)
-
 
 def _retrieval_model_metadata() -> Dict[str, Any]:
     provider = settings.provider.provider
@@ -777,6 +689,183 @@ def _retrieval_model_metadata() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+class PathCandidateRetriever:
+    def __init__(self, storage):
+        self.storage = storage
+
+    def retrieve(self, plan):
+        config = RetrievalSettings(**plan.settings)
+        entity_matches = self.storage.query_entities(
+            plan.query,
+            limit=config.entity_top_k,
+        )
+        relation_matches = self.storage.query_relations(
+            plan.query,
+            limit=config.relation_top_k,
+        )
+        chunk_matches = self.storage.query_chunks(
+            plan.query,
+            limit=config.chunk_top_k,
+        )
+
+        allowed_documents = _normalise_document_filter(plan.metadata.get("allowed_document_names"))
+        if allowed_documents:
+            entity_matches = [
+                match
+                for match in entity_matches
+                if _filepath_matches_allowed(
+                    (self.storage.get_node(match.name) or {}).get("filepath", ""),
+                    allowed_documents,
+                )
+            ]
+            relation_matches = [
+                match
+                for match in relation_matches
+                if _filepath_matches_allowed(
+                    (self.storage.graph.get_edge_data(match.source_name, match.target_name) or {}).get("filepath", ""),
+                    allowed_documents,
+                )
+            ]
+            chunk_matches = [
+                match
+                for match in chunk_matches
+                if _chunk_matches_allowed(match, allowed_documents)
+            ]
+
+        candidates = retrieval_candidates_from_legacy(plan, {
+            "entity_matches": entity_matches, "relation_matches": relation_matches, "chunk_matches": chunk_matches})
+        graph = self.storage.graph.copy()
+        if allowed_documents:
+            graph.remove_edges_from([(source, target) for source, target, row in graph.edges(data=True)
+                if not _filepath_matches_allowed(row.get("filepath"), allowed_documents)])
+            graph.remove_nodes_from([name for name, row in graph.nodes(data=True)
+                if not _filepath_matches_allowed(row.get("filepath"), allowed_documents)])
+        for entity in candidates.entities:
+            row = graph.nodes.get(entity.name, {})
+            entity.metadata.update(filepath=row.get("filepath"), source_ids=tuple(row.get("chunk_uuids", ())))
+        for relation in candidates.relations:
+            row = graph.get_edge_data(relation.source_name, relation.target_name) or {}
+            relation.metadata.update(filepath=row.get("filepath"), source_ids=tuple(row.get("chunk_uuids", ())))
+        return replace(candidates, metadata={"graph_data": nx.node_link_data(graph, edges="edges")})
+
+
+class PathGraphView:
+    """In-memory graph adapter; context construction cannot query storage."""
+    def __init__(self, graph):
+        self.graph = graph
+
+    describe_subgraph = StorageAdapter.describe_subgraph
+    _format_subgraph = staticmethod(StorageAdapter._format_subgraph)
+
+
+class PathContextBuilder:
+    def build(self, plan, candidates):
+        config = RetrievalSettings(**plan.settings)
+        adapter = PathGraphView(nx.node_link_graph(candidates.metadata["graph_data"], edges="edges"))
+        entity_matches = candidates.entities
+        chunk_matches = candidates.chunks
+        def build_global_windows(
+            adapter: "StorageAdapter",
+            seeds: Sequence["EntityMatch"],
+        ) -> List["ContextWindow"]:
+            """
+            Build high-level (global) context windows using path-finding between entities.
+            - Uses top-K entity seeds.
+            - Enumerates paths up to depth (hops).
+            - Weights and ranks paths (PathRAG-style).
+            - Returns ContextWindows labeled 'global::path::<src>→<tgt>'.
+            """
+            if not config.hybrid_use_paths_for_global or not seeds:
+                return []
+
+            # weighted paths between top entities
+            path_windows = build_path_windows(
+                adapter,
+                seeds,
+                use_top_entities=config.path_use_top_entities,
+                max_depth=config.path_max_depth,
+                threshold=config.path_threshold,
+                alpha=config.path_alpha,
+                max_windows=config.path_max_windows,
+                max_tokens=config.path_window_tokens,
+                model=config.tiktoken_model,
+                label_prefix="global::",
+            )
+            return path_windows
+
+        def build_local_windows(
+            adapter: "StorageAdapter",
+            seeds: Sequence["EntityMatch"],
+            chunks: Sequence["ChunkMatch"],
+        ) -> List["ContextWindow"]:
+            """
+            Build low-level (local) context windows.
+            - Includes raw chunk windows (from vector search).
+            - Optionally includes graph neighborhoods (subgraph).
+            - Returns ContextWindows labeled 'local::chunk' or 'local::graph'.
+            """
+            # initialise empty list
+            local_windows: List[ContextWindow] = []
+
+            if config.use_local_chunks and chunks:
+                local_windows += build_chunk_windows(
+                    chunks,
+                    max_windows=config.chunk_windows,
+                    max_tokens=config.chunk_window_tokens,
+                    model=config.tiktoken_model,
+                    label_prefix="local::",
+                )
+
+            if config.use_local_graph and seeds:
+                local_windows += build_graph_windows(
+                    adapter,
+                    seeds,
+                    depth=config.graph_depth,
+                    max_windows=config.graph_windows,
+                    max_tokens=config.graph_window_tokens,
+                    model=config.tiktoken_model,
+                    label_prefix="local::",
+                )
+
+            return local_windows[:config.local_max_windows]
+
+        # Assemble global context windows
+        global_windows = build_global_windows(adapter, entity_matches)
+
+        # Assemble local context windows
+        local_windows = build_local_windows(
+            adapter,
+            entity_matches,
+            chunk_matches,
+        )
+
+        # Merge windows
+        context_windows = global_windows + local_windows
+
+        windows = context_windows
+        return context_from_candidates(candidates, windows, metadata={
+            "global_window_count": len(global_windows), "local_window_count": len(local_windows)})
+
+
+async def generate_path_answer(query, context, history, *, chat):
+    config = RetrievalSettings(**context.query_plan.settings)
+    prompt = PROMPTS["pathrag_response"].format(
+        context_data=build_context_for_prompt(context.context_windows, context.entities, context.relations, context.chunks),
+        response_type=config.response_type,
+        history=render_history(history, max_turns=config.history_turns), user_prompt=query)
+    return await chat.generate(prompt, max_tokens=config.llm_max_tokens,
+                                     temperature=config.llm_temperature)
+
+
+def make_answer_generator(chat=None):
+    """Create an answer adapter that needs supplied context and a model, without storage."""
+    chat = chat if chat is not None else RetrieveChat()
+    return AsyncTextAnswerGenerator(
+        lambda query, context, history: generate_path_answer(query, context, history, chat=chat),
+        model=_retrieval_model_metadata(),
+    )
+
+
 class PathRAG:
     """ PathRAG retriever that integrates storage and LLM to answer questions.
     Example usage:
@@ -791,7 +880,15 @@ class PathRAG:
         project_paths: Optional[ProjectPaths] = None,
         system_prompt: Optional[str] = None,
         log_file: Optional[str] = None,
+        query_analyzer=None, candidate_retriever=None, context_builder=None,
+        answer_generator=None, reranker=None, audit_recorder=None,
     ) -> None:
+        self._query_analyzer = query_analyzer
+        self._candidate_retriever = candidate_retriever
+        self._context_builder = context_builder
+        self._answer_generator = answer_generator
+        self._reranker = reranker
+        self._audit_recorder = audit_recorder
         self._project_paths = project_paths
         effective_storage_paths = (
             storage_paths
@@ -827,233 +924,15 @@ class PathRAG:
     # ------------------------------------------------------------------
     # Retrieval entry points
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # Retrieval entry points
-    # ------------------------------------------------------------------
-    async def aretrieve(
-        self,
-        question: str,
-        conversation_history: Optional[List[Tuple[str, str]]] = None,
-        allowed_document_names: Optional[Iterable[str]] = None,
-    ) -> RetrievalResult:
-        # TODO: add conversation history support. LightRAG first extracts keywords from history, then uses last n turns in system prompt.
-        LOGGER.info("Running retrieval for query: %s", question)
-
-        entity_matches = self._storage.query_entities(
-            question,
-            limit=settings.retrieval.entity_top_k,
-        )
-        relation_matches = self._storage.query_relations(
-            question,
-            limit=settings.retrieval.relation_top_k,
-        )
-        chunk_matches = self._storage.query_chunks(
-            question,
-            limit=settings.retrieval.chunk_top_k,
-        )
-
-        allowed_documents = _normalise_document_filter(allowed_document_names)
-        if allowed_documents:
-            entity_matches = [
-                match
-                for match in entity_matches
-                if _filepath_matches_allowed(
-                    (self._storage.get_node(match.name) or {}).get("filepath", ""),
-                    allowed_documents,
-                )
-            ]
-            relation_matches = [
-                match
-                for match in relation_matches
-                if (
-                    _filepath_matches_allowed(
-                        (self._storage.graph.get_edge_data(match.source_name, match.target_name) or {}).get("filepath", ""),
-                        allowed_documents,
-                    )
-                    or _filepath_matches_allowed(
-                        (self._storage.get_node(match.source_name) or {}).get("filepath", ""),
-                        allowed_documents,
-                    )
-                    or _filepath_matches_allowed(
-                        (self._storage.get_node(match.target_name) or {}).get("filepath", ""),
-                        allowed_documents,
-                    )
-                )
-            ]
-            chunk_matches = [
-                match
-                for match in chunk_matches
-                if _chunk_matches_allowed(match, allowed_documents)
-            ]
-
-        def build_global_windows(
-            adapter: "StorageAdapter",
-            seeds: Sequence["EntityMatch"],
-        ) -> List["ContextWindow"]:
-            """
-            Build high-level (global) context windows using path-finding between entities.
-            - Uses top-K entity seeds.
-            - Enumerates paths up to depth (hops).
-            - Weights and ranks paths (PathRAG-style).
-            - Returns ContextWindows labeled 'global::path::<src>→<tgt>'.
-            """
-            if not settings.retrieval.hybrid_use_paths_for_global or not seeds:
-                return []
-
-            # weighted paths between top entities
-            path_windows = build_path_windows(
-                adapter,
-                seeds,
-                use_top_entities=settings.retrieval.path_use_top_entities,
-                max_depth=settings.retrieval.path_max_depth,
-                threshold=settings.retrieval.path_threshold,
-                alpha=settings.retrieval.path_alpha,
-                max_windows=settings.retrieval.path_max_windows,
-                max_tokens=settings.retrieval.path_window_tokens,
-                model=settings.retrieval.tiktoken_model,
-                label_prefix="global::",
-            )
-            return path_windows
-
-        def build_local_windows(
-            adapter: "StorageAdapter",
-            seeds: Sequence["EntityMatch"],
-            chunks: Sequence["ChunkMatch"],
-        ) -> List["ContextWindow"]:
-            """
-            Build low-level (local) context windows.
-            - Includes raw chunk windows (from vector search).
-            - Optionally includes graph neighborhoods (subgraph).
-            - Returns ContextWindows labeled 'local::chunk' or 'local::graph'.
-            """
-            # initialise empty list
-            local_windows: List[ContextWindow] = []
-
-            if settings.retrieval.use_local_chunks and chunks:
-                local_windows += build_chunk_windows(
-                    chunks,
-                    max_windows=settings.retrieval.chunk_windows,          # FIXED
-                    max_tokens=settings.retrieval.chunk_window_tokens,     # FIXED
-                    model=settings.retrieval.tiktoken_model,
-                    label_prefix="local::",
-                )
-
-            if settings.retrieval.use_local_graph and seeds:
-                local_windows += build_graph_windows(
-                    adapter,
-                    seeds,
-                    depth=settings.retrieval.graph_depth,
-                    max_windows=settings.retrieval.graph_windows,
-                    max_tokens=settings.retrieval.graph_window_tokens,
-                    model=settings.retrieval.tiktoken_model,
-                    label_prefix="local::",
-                )
-
-            return local_windows[:settings.retrieval.local_max_windows]
-
-        # Assemble global context windows
-        global_windows = build_global_windows(self._storage, entity_matches)
-
-        # Assemble local context windows
-        local_windows = build_local_windows(
-            self._storage,
-            entity_matches,
-            chunk_matches,
-        )
-
-        # Merge windows
-        context_windows = global_windows + local_windows
-
-        # Build JSON context for the prompt
-        context_data = build_context_for_prompt(
-            context_windows=context_windows,
-            entity_matches=entity_matches,
-            relation_matches=relation_matches,
-            chunk_matches=chunk_matches,
-        )
-
-        # Render conversation history (up to N turns, default 10)
-        history_text = render_history(
-            conversation_history,
-            max_turns=getattr(settings.retrieval, "path_history_turns", 10),
-        )
-
-        # Build system prompt using the dedicated PathRAG template
-        sys_prompt_template = PROMPTS["pathrag_response"]
-        prompt = sys_prompt_template.format(
-            context_data=context_data,
-            response_type=settings.retrieval.response_type,
-            history=history_text,
-            user_prompt=question,
-        )
-
-        answer = await self._chat.generate(
-            prompt,
-            max_tokens=settings.retrieval.llm_max_tokens,
-            temperature=settings.retrieval.llm_temperature,
-        )
-        result = RetrievalResult(
-            answer=answer,
-            context_windows=context_windows,
-            entity_matches=entity_matches,
-            relation_matches=relation_matches,
-            chunk_matches=chunk_matches,
-        )
-        if settings.logging.audit_enabled:
-            write_audit_log(
-                project_paths=self._project_paths,
-                retriever_name="pathrag",
-                payload={
-                    "question": question,
-                    "answer": answer,
-                    "active_documents_root": str(self._project_paths.documents_root)
-                    if self._project_paths
-                    else None,
-                    "conversation_history": conversation_history or [],
-                    "retrieval_metadata": {
-                        "response_type": settings.retrieval.response_type,
-                        "entity_top_k": settings.retrieval.entity_top_k,
-                        "relation_top_k": settings.retrieval.relation_top_k,
-                        "chunk_top_k": settings.retrieval.chunk_top_k,
-                        "global_window_count": len(global_windows),
-                        "local_window_count": len(local_windows),
-                    },
-                    "model": _retrieval_model_metadata(),
-                    "context_windows": [
-                        {"label": window.label, "text": window.text, "score": window.score}
-                        for window in context_windows
-                    ],
-                    "retrieved_entities": [
-                        {
-                            "name": match.name,
-                            "type": match.type,
-                            "description": match.description,
-                            "score": match.score,
-                        }
-                        for match in entity_matches
-                    ],
-                    "retrieved_relationships": [
-                        {
-                            "source_name": match.source_name,
-                            "target_name": match.target_name,
-                            "description": match.description,
-                            "keywords": match.keywords,
-                            "score": match.score,
-                        }
-                        for match in relation_matches
-                    ],
-                    "retrieved_chunks": [
-                        {
-                            "chunk_uuid": match.chunk_uuid,
-                            "document_id": match.document_id,
-                            "filename": match.filename,
-                            "text": match.text,
-                            "score": match.score,
-                        }
-                        for match in chunk_matches
-                    ],
-                },
-            )
+    async def aretrieve(self, question, conversation_history=None, allowed_document_names=None) -> AnswerResult:
+        plan = analyze_query(question, conversation_history or [], self._query_analyzer or PassThroughQueryAnalyzer(settings=asdict(settings.retrieval)))
+        plan = replace(plan, metadata={**plan.metadata, "allowed_document_names": list(allowed_document_names) if allowed_document_names is not None else None})
+        candidates = stages.retrieve_candidates(plan, self._candidate_retriever or PathCandidateRetriever(self._storage))
+        context = stages.build_context(plan, candidates, self._context_builder or PathContextBuilder())
+        context = stages.rerank_context(context, self._reranker)
+        result = await generate_answer_async(question, context, plan.history,
+            self._answer_generator or make_answer_generator(self._chat))
+        record_chat_audit(result, self._project_paths, self._audit_recorder)
         return result
 
     def retrieve(
@@ -1061,11 +940,11 @@ class PathRAG:
         question: str,
         conversation_history: Optional[List[Tuple[str, str]]] = None,
         allowed_document_names: Optional[Iterable[str]] = None,
-    ) -> RetrievalResult:
+    ) -> AnswerResult:
         """Synchronous helper that creates an event loop if needed."""
 
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.aretrieve(question, conversation_history, allowed_document_names))
         else:  # pragma: no cover - usage depends on embedding application
@@ -1082,5 +961,5 @@ __all__ = [
     "RelationMatch",
     "ChunkMatch",
     "ContextWindow",
-    "RetrievalResult",
+    "AnswerResult",
 ]

@@ -4,6 +4,10 @@
 
 Refactor the ingestion and retrieval pipeline into independently testable and benchmarkable components without changing user-visible behavior. Work through one section at a time, keep the existing `ingest_paths()`, PathRAG, and LightRAG entrypoints as compatibility wrappers until final integration, and do not combine unrelated modules in one commit.
 
+## Production integration status (2026-10-12)
+
+PRs through #48 provide the typed contracts and independently tested connectors; the production entrypoints were not fully migrated. The local PR #49 candidate wires ingestion, PathRAG and LightRAG through those stages, updates their UI/CLI consumers and removes superseded implementations. Public RAG results now use `AnswerResult`; backward compatibility is not required. See [the scope and final verification](../PRODUCTION_WIRING_PLAN.md). Additional benchmark tooling remains separate work.
+
 ## Working Rules
 
 - Complete and review one numbered section before starting the next.

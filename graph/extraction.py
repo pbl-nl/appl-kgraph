@@ -55,6 +55,8 @@ def extract_graph(
         raise TypeError("chunks must be a sequence of Chunk objects")
     if not all(isinstance(chunk, Chunk) for chunk in chunks):
         raise TypeError("chunks must contain only Chunk objects")
+    if not chunks:
+        return ExtractionResult()
     result = extractor.extract(tuple(chunks))
     if not isinstance(result, ExtractionResult):
         raise TypeError("extractor must return an ExtractionResult")

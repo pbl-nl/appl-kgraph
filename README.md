@@ -150,13 +150,58 @@ If your document collection includes `.docx` files, ensure that **Microsoft Word
 
 ---
 
+### Running with Docker
+
+Install Docker Engine or Docker Desktop, then build from the project root:
+
+```sh
+docker build -t appl-kgraph .
+```
+
+Create `.env` using the LLM configuration above. For Docker's `--env-file`,
+write values without surrounding quotes, for example `LLM_PROVIDER=openai`.
+Credentials, local documents, and generated storage are excluded from the image.
+
+Create a `docs` directory and place your documents there. Run the Gradio UI:
+
+```sh
+docker run --rm --name appl-kgraph -p 127.0.0.1:7860:7860 \
+  --env-file .env \
+  --mount type=bind,source="$(pwd)/docs",target=/app/docs \
+  --mount type=volume,source=appl-kgraph-models,target=/app/flashrank_model \
+  appl-kgraph
+```
+
+These examples use a macOS/Linux shell; in Windows PowerShell, replace
+`$(pwd)` with `${PWD}` and enter the command on one line.
+Open [the Gradio UI](http://localhost:7860) and use `/app/docs` as the document
+folder. Paths entered in the UI must refer to paths inside the container.
+The container runs as UID 10001; the mounted documents directory must be writable
+by that user because indexes, graphs, and logs are saved under
+`docs/.appl-kgraph`. These files persist on the host after the container exits.
+The named volume retains downloaded reranker models between runs. Model downloads
+and LLM requests require network access.
+
+To run the interactive command-line pipeline instead:
+
+```sh
+docker run --rm -it --env-file .env \
+  --mount type=bind,source="$(pwd)/docs",target=/app/docs \
+  --mount type=volume,source=appl-kgraph-models,target=/app/flashrank_model \
+  appl-kgraph python graph/main.py /app/docs
+```
+
+The image uses Python 3.13. DOCX conversion currently depends on Microsoft Word
+and does not work in this Linux container; convert DOCX files to PDF before
+ingesting them.
+
 ### Running the project
 
 From the project root, run:
 
 ```text
-Windows: py -3.12 graph/main.py
-macOS/Linux: python3.12 graph/main.py
+Windows: py -3.13 graph/main.py
+macOS/Linux: python3.13 graph/main.py
 ```
 
 This will execute the current end-to-end pipeline using the configured retrieval strategy.
@@ -181,4 +226,3 @@ If you use ideas, code, or design patterns from this project in academic or appl
 For questions, feedback, or collaboration inquiries, you can contact the maintainers at:
 
 📧 <a href='mailto:stefan.troost@pbl.nl, k.wittenberg@scp.nl'>Contact link</a>
-

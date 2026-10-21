@@ -1,13 +1,8 @@
 import json
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 
@@ -16,7 +11,7 @@ import query_logging
 from query_logging import build_audit_settings_snapshot, write_audit_log
 
 
-def test_write_audit_log_records_reproducibility_payload(tmp_path):
+def test_write_audit_log_records_reproducibility_payload(tmp_path, llm_provider):
     documents_root = tmp_path / "docs"
     documents_root.mkdir()
     project_paths = resolve_project_paths(documents_root)
@@ -40,7 +35,7 @@ def test_write_audit_log_records_reproducibility_payload(tmp_path):
     assert body["answer"] == "The audit writer was renamed."
     assert body["conversation_history"] == [["hello", "hi"]]
     assert body["model"] == {"name": "test-model"}
-    assert body["settings"]["provider"]["provider"] == "openai"
+    assert body["settings"]["provider"]["provider"] == llm_provider
     assert "openai_api_key" not in json.dumps(body["settings"]).lower()
 
 
@@ -65,12 +60,15 @@ def test_audit_log_respects_audit_gate(tmp_path, monkeypatch):
     assert not any(project_paths.audit_logs_dir.glob("*.json"))
 
 
-def test_removed_query_log_alias_is_not_available():
-    assert not hasattr(query_logging, "write_query_log")
-
-
-def test_audit_settings_snapshot_excludes_secret_provider_fields():
+def test_audit_settings_snapshot_excludes_secret_provider_fields(llm_provider):
     snapshot = build_audit_settings_snapshot()
 
     assert "api_key" not in json.dumps(snapshot).lower()
-    assert snapshot["provider"]["llm_model"] == "test-model"
+    assert snapshot["provider"] == {
+        "provider": llm_provider,
+        "llm_model": f"test-{llm_provider}-chat",
+        "embeddings_model": f"test-{llm_provider}-embedding",
+        "azure_api_version": "2024-02-15-preview" if llm_provider == "azure" else None,
+    }
+    assert "test-openai-key" not in json.dumps(snapshot)
+    assert "test-azure-key" not in json.dumps(snapshot)

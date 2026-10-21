@@ -1,4 +1,3 @@
-import os
 import sys
 import types
 import json
@@ -7,9 +6,6 @@ from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 sys.modules.setdefault("fitz", types.ModuleType("fitz"))
 

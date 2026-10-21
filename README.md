@@ -162,7 +162,6 @@ From the project root, run:
 
 ```text
 python graph/main.py
-
 ```
 
 This will execute the current end-to-end pipeline using the configured retrieval strategy.

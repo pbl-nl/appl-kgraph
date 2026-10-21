@@ -1,13 +1,8 @@
-import os
 import sys
 from pathlib import Path
 
 import networkx as nx
 
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 

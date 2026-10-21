@@ -400,9 +400,31 @@ class RetrievalCandidates:
 
 
 @dataclass(frozen=True)
+class ContextWindow:
+    label: str
+    text: str
+    score: float = 0.0
+    source_refs: Tuple[str, ...] = field(default_factory=tuple)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.label, "context window label")
+        if not isinstance(self.text, str):
+            raise TypeError("context window text must be a string")
+        object.__setattr__(self, "score", _finite_score(self.score))
+        source_refs = tuple(self.source_refs)
+        for source_ref in source_refs:
+            _require_identifier(source_ref, "context window source reference")
+        if len(set(source_refs)) != len(source_refs):
+            raise ValueError("context window source references must be unique")
+        object.__setattr__(self, "source_refs", source_refs)
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
+
+@dataclass(frozen=True)
 class RetrievedContext:
     query_plan: QueryPlan
-    context_windows: List[Any] = field(default_factory=list)
+    context_windows: List[ContextWindow] = field(default_factory=list)
     entities: List[Entity] = field(default_factory=list)
     relations: List[Relation] = field(default_factory=list)
     chunks: List[Chunk] = field(default_factory=list)
@@ -411,6 +433,16 @@ class RetrievedContext:
     def __post_init__(self) -> None:
         if not isinstance(self.query_plan, QueryPlan):
             raise TypeError("query_plan must be a QueryPlan")
+        if not all(
+            isinstance(window, ContextWindow) for window in self.context_windows
+        ):
+            raise TypeError("context_windows must contain ContextWindow objects")
+        if not all(isinstance(entity, Entity) for entity in self.entities):
+            raise TypeError("entities must contain Entity objects")
+        if not all(isinstance(relation, Relation) for relation in self.relations):
+            raise TypeError("relations must contain Relation objects")
+        if not all(isinstance(chunk, Chunk) for chunk in self.chunks):
+            raise TypeError("chunks must contain Chunk objects")
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 

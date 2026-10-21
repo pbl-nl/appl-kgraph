@@ -176,8 +176,8 @@ These examples use a macOS/Linux shell; in Windows PowerShell, replace
 `$(pwd)` with `${PWD}` and enter the command on one line.
 Open [the Gradio UI](http://localhost:7860) and use `/app/docs` as the document
 folder. Paths entered in the UI must refer to paths inside the container.
-The container runs as UID 10001; the mounted documents directory must be writable
-by that user because indexes, graphs, and logs are saved under
+The container runs as the nonroot `mambauser`; the mounted documents directory
+must be writable by that user because indexes, graphs, and logs are saved under
 `docs/.appl-kgraph`. These files persist on the host after the container exits.
 The named volume retains downloaded reranker models between runs. Model downloads
 and LLM requests require network access.
@@ -191,7 +191,8 @@ docker run --rm -it --env-file .env \
   appl-kgraph python graph/main.py /app/docs
 ```
 
-The image uses Python 3.13. DOCX conversion currently depends on Microsoft Word
+The image installs the same `appl-kgraph.yml` Conda environment as local development,
+using Python 3.13. DOCX conversion currently depends on Microsoft Word
 and does not work in this Linux container; convert DOCX files to PDF before
 ingesting them.
 

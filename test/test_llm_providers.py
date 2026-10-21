@@ -142,24 +142,37 @@ def test_embedder_routes_batches_and_preserves_input_order(provider_settings, sd
 
 
 @pytest.mark.parametrize(
-    ("provider", "missing"),
+    ("provider", "missing", "adapter"),
     [
-        ("openai", "OPENAI_API_KEY"),
-        ("openai", "OPENAI_LLM_MODEL"),
-        ("openai", "OPENAI_EMBEDDINGS_MODEL"),
-        ("azure", "AZURE_OPENAI_API_KEY"),
-        ("azure", "AZURE_OPENAI_ENDPOINT"),
-        ("azure", "AZURE_OPENAI_LLM_DEPLOYMENT_NAME"),
-        ("azure", "AZURE_OPENAI_EMB_DEPLOYMENT_NAME"),
+        ("openai", "OPENAI_API_KEY", llm.Chat),
+        ("openai", "OPENAI_LLM_MODEL", llm.Chat),
+        ("openai", "OPENAI_API_KEY", llm.Embedder),
+        ("azure", "AZURE_OPENAI_API_KEY", llm.Chat),
+        ("azure", "AZURE_OPENAI_ENDPOINT", llm.Chat),
+        ("azure", "AZURE_OPENAI_LLM_DEPLOYMENT_NAME", llm.Chat),
+        ("azure", "AZURE_OPENAI_API_KEY", llm.Embedder),
+        ("azure", "AZURE_OPENAI_ENDPOINT", llm.Embedder),
+        ("azure", "AZURE_OPENAI_EMB_DEPLOYMENT_NAME", llm.Embedder),
     ],
 )
-def test_settings_reject_missing_selected_provider_configuration(monkeypatch, provider, missing):
+def test_model_adapter_rejects_missing_provider_configuration(
+    monkeypatch, provider, missing, adapter
+):
     _set_provider_environment(monkeypatch, provider)
     monkeypatch.delenv(missing)
+    monkeypatch.setattr(llm, "settings", settings_module.load_settings())
 
     with pytest.raises(RuntimeError, match=missing):
-        settings_module.load_settings()
+        adapter()
 
+
+def test_openai_embedder_uses_default_model_when_not_configured(monkeypatch, sdk_requests):
+    _set_provider_environment(monkeypatch, "openai")
+    monkeypatch.delenv("OPENAI_EMBEDDINGS_MODEL")
+    monkeypatch.setattr(llm, "settings", settings_module.load_settings())
+
+    assert llm.Embedder().embed_texts(["one"]) == [[3.0, 0.5]]
+    assert sdk_requests[0][1]["model"] == "text-embedding-3-small"
 
 def test_settings_reject_unknown_provider(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "unsupported")

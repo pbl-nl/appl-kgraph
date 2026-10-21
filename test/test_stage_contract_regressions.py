@@ -1,4 +1,3 @@
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -84,20 +83,6 @@ def test_pure_document_stages_import_without_model_credentials(tmp_path, provide
         text=True,
     )
     assert result.returncode == 0, result.stderr
-
-
-def test_chat_still_requires_model_credentials(monkeypatch):
-    import llm
-
-    provider = replace(
-        llm.settings.provider,
-        provider="openai",
-        openai_api_key=None,
-        openai_llm_model=None,
-    )
-    monkeypatch.setattr(llm, "settings", replace(llm.settings, provider=provider))
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        llm.Chat()
 
 
 def test_html_cp1252_encoding_is_preserved(tmp_path):

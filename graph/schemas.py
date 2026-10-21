@@ -405,6 +405,50 @@ class AnswerResult:
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
+@dataclass(frozen=True)
+class IngestedDocument:
+    ref: DocumentRef
+    doc_id: str
+    chunk_count: int
+    entity_count: int
+    relation_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ref, DocumentRef):
+            raise TypeError("ref must be a DocumentRef")
+        _require_identifier(self.doc_id, "doc_id")
+        _require_non_negative_integer(self.chunk_count, "chunk_count")
+        _require_non_negative_integer(self.entity_count, "entity_count")
+        _require_non_negative_integer(self.relation_count, "relation_count")
+
+
+@dataclass(frozen=True)
+class IngestionSummary:
+    documents: Tuple[IngestedDocument, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        documents = tuple(self.documents)
+        if not all(isinstance(document, IngestedDocument) for document in documents):
+            raise TypeError("documents must contain IngestedDocument objects")
+        object.__setattr__(self, "documents", documents)
+
+    @property
+    def processed_files(self) -> int:
+        return len(self.documents)
+
+    @property
+    def chunk_count(self) -> int:
+        return sum(document.chunk_count for document in self.documents)
+
+    @property
+    def entity_count(self) -> int:
+        return sum(document.entity_count for document in self.documents)
+
+    @property
+    def relation_count(self) -> int:
+        return sum(document.relation_count for document in self.documents)
+
+
 _ENTITY_LEGACY_FIELDS = {
     "name",
     "type",

@@ -60,14 +60,15 @@ def test_real_parser_failure_has_document_context(tmp_path):
         parse_document(DocumentRef(path), FileDocumentParser())
 
 
-def test_pure_document_stages_import_without_model_credentials(tmp_path):
+@pytest.mark.parametrize("provider", ["openai", "azure"])
+def test_pure_document_stages_import_without_model_credentials(tmp_path, provider):
     import os, subprocess, sys
 
     env = dict(os.environ)
     for key in list(env):
         if key.startswith(("OPENAI_", "AZURE_OPENAI_")):
             del env[key]
-    env["LLM_PROVIDER"] = "openai"
+    env["LLM_PROVIDER"] = provider
     env["PYTHON_DOTENV_DISABLED"] = "1"
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "graph")
     result = subprocess.run(

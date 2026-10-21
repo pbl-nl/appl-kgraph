@@ -19,7 +19,7 @@ def test_ingest_paths_uses_all_typed_stages_and_canonical_snapshots(
 ):
     document = tmp_path / "report.txt"
     document.write_text("Alpha works with Beta.", encoding="utf-8")
-    extractor, constructed = configure_ingestion(monkeypatch)
+    extractor = configure_ingestion(monkeypatch)
     progress = []
     result = ingestion.ingest_paths(
         [document], documents_root=tmp_path, progress_callback=progress.append
@@ -72,7 +72,7 @@ def test_skip_partial_selection_replacement_and_removal(tmp_path, monkeypatch):
     a, b = tmp_path / "a.txt", tmp_path / "b.txt"
     a.write_text("Alpha one.")
     b.write_text("Alpha two.")
-    extractor, _ = configure_ingestion(monkeypatch)
+    extractor = configure_ingestion(monkeypatch)
     assert (
         ingestion.ingest_paths([a, b], documents_root=tmp_path)["processed_files"] == 2
     )
@@ -119,7 +119,7 @@ def test_pending_marker_and_retry_preserve_completed_files(
     a, b = tmp_path / "a.txt", tmp_path / "b.txt"
     a.write_text("Alpha one.")
     b.write_text("Alpha two.")
-    extractor, _ = configure_ingestion(monkeypatch)
+    extractor = configure_ingestion(monkeypatch)
     factory = ingestion.create_ingestion_pipeline
 
     def broken(storage, paths, **kwargs):

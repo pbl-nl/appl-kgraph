@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 import pytest
 
@@ -59,7 +60,10 @@ def test_canonical_snapshots_survive_disabled_logging_and_progress(
     from project_paths import resolve_project_paths
 
     paths = resolve_project_paths(tmp_path)
-    assert (paths.raw_documents_dir / "a.txt.raw.json").exists()
-    assert (paths.raw_documents_dir / "a.txt.enriched.json").exists()
+    raw = json.loads((paths.raw_documents_dir / "a.txt.raw.json").read_text())
+    enriched = json.loads((paths.raw_documents_dir / "a.txt.enriched.json").read_text())
+    assert raw["doc_id"] == enriched["doc_id"]
+    assert raw["text"] == enriched["text"] == "Alpha."
+    assert enriched["transformations"] == ["normalize_metadata"]
     assert not list(paths.extraction_diagnostics_dir.glob("*.json"))
     assert result["processed_files"] == 1

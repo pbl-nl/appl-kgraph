@@ -1,9 +1,4 @@
 import hashlib
-import os
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 from db_storage import Storage
 import ingestion
@@ -52,11 +47,9 @@ class DeterministicExtractor:
 
 def configure_ingestion(monkeypatch, extractor=None):
     extractor = extractor or DeterministicExtractor()
-    constructed = []
 
     def make_storage(paths=None):
         storage = Storage(paths=paths, embedder=DeterministicEmbedder())
-        constructed.append(storage)
         return storage
 
     factory = production_ingestion.create_ingestion_pipeline
@@ -66,7 +59,7 @@ def configure_ingestion(monkeypatch, extractor=None):
 
     monkeypatch.setattr(ingestion, "Storage", make_storage)
     monkeypatch.setattr(ingestion, "create_ingestion_pipeline", pipeline)
-    return extractor, constructed
+    return extractor
 
 
 class DeterministicChat:

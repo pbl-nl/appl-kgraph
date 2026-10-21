@@ -30,7 +30,7 @@ from schemas import (
     retrieval_candidates_to_legacy,
 )
 from extractor import parse_model_output
-from ingestion import build_chunks
+from chunker import chunk_document, ChunkingConfig
 from pathrag import ChunkMatch, EntityMatch, RelationMatch
 
 
@@ -264,9 +264,9 @@ def test_pathrag_candidate_payload_round_trip():
     assert candidates.query_plan is query_plan
     assert candidates.metadata == {"strategy": "pathrag"}
     assert retrieval_candidates_to_legacy(candidates) == {
-        "entity_matches": [asdict(entity_match)],
-        "relation_matches": [asdict(relation_match)],
-        "chunk_matches": [asdict(chunk_match)],
+        "entity_matches": [{key: value for key, value in asdict(entity_match).items() if key != "metadata"}],
+        "relation_matches": [{key: value for key, value in asdict(relation_match).items() if key != "metadata"}],
+        "chunk_matches": [{key: value for key, value in asdict(chunk_match).items() if key != "metadata"}],
         "strategy": "pathrag",
     }
 
@@ -333,15 +333,9 @@ def test_retrieval_candidate_conversion_accepts_empty_payload():
 
 
 def test_chunk_contract_accepts_current_ingestion_payload():
-    payloads = build_chunks(
-        [(0, "Alpha is the first sentence. Beta is the second sentence.")],
-        doc_id="doc-1",
-        filename="report.md",
-        filepath="/documents/report.md",
-        document_language="en",
-    )
-
-    chunks = [Chunk(**payload) for payload in payloads]
+    text = "Alpha is the first sentence. Beta is the second sentence."
+    raw = RawDocument(DocumentRef(Path("/documents/report.md")), "doc-1", ((0, text),), text)
+    chunks = chunk_document(EnrichedDocument(raw, text, metadata={"language": "en"}), ChunkingConfig())
 
     assert len(chunks) == 1
     assert chunks[0].chunk_uuid
@@ -350,7 +344,7 @@ def test_chunk_contract_accepts_current_ingestion_payload():
     assert chunks[0].char_count == len(chunks[0].text)
     assert chunks[0].start_page == 0
     assert chunks[0].end_page == 0
-    assert chunks[0].filepath == "/documents/report.md"
+    assert chunks[0].filepath == str(Path("/documents/report.md").resolve())
     assert chunks[0].document_language == "en"
 
 

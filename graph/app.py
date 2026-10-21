@@ -1057,9 +1057,9 @@ async def create_pathrag_response(
         )
         history.append({"role": "assistant", "content": str(result.answer or "")})
         sources = []
-        for index, chunk in enumerate(result.chunk_matches, start=1):
-            head = chunk.filename or chunk.document_id or "(unknown doc)"
-            sources.append(f"{index}. {head} (score={chunk.score:.3f})")
+        for index, chunk in enumerate(result.context.chunks, start=1):
+            head = chunk.filename or chunk.doc_id or "(unknown doc)"
+            sources.append(f"{index}. {head} (score={chunk.metadata.get('score', 0.0):.3f})")
             sources.append(chunk.text)
             sources.append("-" * 46)
         return "", _chat_history_for_component(history), "\n".join(sources)
@@ -1096,13 +1096,13 @@ async def create_lightrag_response(
         )
         history.append({"role": "assistant", "content": str(result.answer or "")})
         sources = []
-        for index, chunk in enumerate(result.all_chunks, start=1):
-            source_type = chunk.get("source_type", "unknown")
+        for index, chunk in enumerate(result.context.chunks, start=1):
+            source_type = chunk.metadata.get("source_type", "unknown")
             line = f"{index}. {source_type}"
-            if source_type == "vector" and chunk.get("score") is not None:
-                line += f" (score={float(chunk['score']):.3f})"
+            if source_type == "vector" and chunk.metadata.get("score") is not None:
+                line += f" (score={float(chunk.metadata['score']):.3f})"
             sources.append(line)
-            sources.append(chunk.get("text", ""))
+            sources.append(chunk.text)
             sources.append("-" * 46)
         return "", _chat_history_for_component(history), "\n".join(sources)
     except Exception as exc:

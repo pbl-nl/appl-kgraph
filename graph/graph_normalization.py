@@ -117,10 +117,17 @@ def normalize_graph(
         for relation in extraction.relations
         for name in (relation.source_name, relation.target_name)
     }
-    for missing_name in referenced_names - known_names:
-        incoming_entities[missing_name] = [
-            Entity(name=missing_name, type="unknown", description="")
-        ]
+    # Relation-only findings still prove that their endpoints occur in a source.
+    # Merge that evidence into existing endpoints as well as new placeholders.
+    for name in sorted(referenced_names):
+        edges = [edge for edge in extraction.relations
+                 if name in (edge.source_name, edge.target_name)]
+        source_ids = _ordered_unique(source for edge in edges for source in edge.source_ids)
+        filepath = delimiter.join(_text_parts((edge.filepath or "" for edge in edges), delimiter)) or None
+        if name not in known_names or source_ids or filepath:
+            incoming_entities.setdefault(name, []).append(
+                Entity(name=name, type="unknown", description="", source_ids=source_ids, filepath=filepath)
+            )
 
     normalized_entities = []
     for name in sorted(incoming_entities):
@@ -210,3 +217,27 @@ def normalize_graph(
         relations=normalized_relations,
         metadata={"delimiter": delimiter},
     )
+
+
+def remove_graph_sources(existing: GraphView, source_ids: Sequence[str], *, filepath: str = "", delimiter: str = DEFAULT_DELIMITER) -> GraphDelta:
+    """Pure source removal: retain shared records and explicitly delete exhausted ones."""
+    from dataclasses import replace
+    removed = set(source_ids)
+    def update(item):
+        sources = tuple(source for source in item.source_ids if source not in removed)
+        paths = delimiter.join(token for token in _text_parts([item.filepath or ""], delimiter)
+                               if not filepath or token.casefold() != filepath.casefold())
+        return replace(item, source_ids=sources, filepath=paths or None)
+    affected_entities = [item for item in existing.entities if removed.intersection(item.source_ids)]
+    affected_relations = [item for item in existing.relations if removed.intersection(item.source_ids)]
+    entities = [update(item) for item in affected_entities]
+    relations = [update(item) for item in affected_relations]
+    deleted_names = {item.name for item in entities if not item.source_ids}
+    # Edges cannot survive deleted endpoints, including records with incomplete old provenance.
+    deleted_pairs = {tuple(sorted((item.source_name, item.target_name))) for item in existing.relations
+                     if item.source_name in deleted_names or item.target_name in deleted_names}
+    deleted_pairs.update(tuple(sorted((item.source_name, item.target_name))) for item in relations if not item.source_ids)
+    return GraphDelta(
+        entities=[item for item in entities if item.source_ids],
+        relations=[item for item in relations if item.source_ids and tuple(sorted((item.source_name, item.target_name))) not in deleted_pairs],
+        deleted_entity_names=tuple(sorted(deleted_names)), deleted_relation_pairs=tuple(sorted(deleted_pairs)))

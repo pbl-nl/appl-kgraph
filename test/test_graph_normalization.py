@@ -77,7 +77,9 @@ def test_normalize_graph_merges_duplicates_and_existing_state_deterministically(
                 ),
                 source_ids=("stored", "chunk-1", "chunk-2"),
                 filepath="stored.txt||new.txt",
-            )
+            ),
+            Entity(name="Beta", type="Person", description="Existing endpoint",
+                   source_ids=("chunk-1", "chunk-2")),
         ],
         relations=[
             Relation(
@@ -150,3 +152,19 @@ def test_normalize_graph_rejects_invalid_connector_inputs(
 ):
     with pytest.raises(TypeError, match=message):
         normalize_graph(extraction, existing)
+
+
+def test_relation_only_update_preserves_shared_endpoints_when_old_source_is_removed():
+    from graph_normalization import remove_graph_sources
+    existing = GraphView(entities=[
+        Entity(name="Alpha", type="Organization", description="Original", source_ids=("old",), filepath="old.txt"),
+        Entity(name="Beta", type="unknown", description="", source_ids=("old",), filepath="old.txt"),
+    ])
+    findings = ExtractionResult(relations=[Relation(
+        source_name="Alpha", target_name="Beta", description="New relation", source_ids=("new",), filepath="new.txt")])
+    upserts = normalize_graph(findings, existing)
+    removed = remove_graph_sources(GraphView(upserts.entities, upserts.relations), ["old"], filepath="old.txt")
+    assert removed.deleted_entity_names == removed.deleted_relation_pairs == ()
+    assert {entity.name for entity in removed.entities} == {"Alpha", "Beta"}
+    assert all(entity.source_ids == ("new",) and entity.filepath == "new.txt" for entity in removed.entities)
+    assert upserts.relations[0].source_ids == ("new",)

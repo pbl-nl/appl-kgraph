@@ -146,7 +146,13 @@ After dependency changes, update it with:
 conda env update -f appl-kgraph.yml --prune
 ```
 
-Configure either Azure OpenAI or OpenAI in `.env` as described above.
+Configure either Azure OpenAI or OpenAI in `.env` as described above. The test
+suite uses fake credentials and responses and does not require either API key:
+
+```sh
+python -m pytest -q --llm-provider=openai
+python -m pytest -q --llm-provider=azure
+```
 
 ---
 

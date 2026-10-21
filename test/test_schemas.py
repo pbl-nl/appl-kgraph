@@ -1,4 +1,3 @@
-import os
 import sys
 from copy import deepcopy
 from dataclasses import asdict
@@ -6,10 +5,6 @@ from pathlib import Path
 
 import pytest
 
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 

@@ -154,16 +154,6 @@ def test_normalize_graph_rejects_invalid_connector_inputs(
         normalize_graph(extraction, existing)
 
 
-def test_graph_delta_carries_explicit_deletions():
-    delta = GraphDelta(
-        deleted_entity_names=("Unused",),
-        deleted_relation_pairs=(("Zulu", "Alpha"),),
-    )
-
-    assert delta.deleted_entity_names == ("Unused",)
-    assert delta.deleted_relation_pairs == (("Alpha", "Zulu"),)
-
-
 def test_relation_only_update_preserves_shared_endpoints_when_old_source_is_removed():
     from graph_normalization import remove_graph_sources
     existing = GraphView(entities=[

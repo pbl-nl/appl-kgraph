@@ -1,10 +1,3 @@
-import os
-
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
-
 from chunker import ChunkingConfig, chunk_document
 from document_parser import parse_document
 from enrichment import MetadataNormalizer, enrich_document

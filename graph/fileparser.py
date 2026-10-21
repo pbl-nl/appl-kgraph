@@ -122,14 +122,19 @@ class FileParser:
 
         return pages, metadata
     
-    def _parse_pdf_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
+    def _parse_pdf_file(
+        self, filepath: Path, *, in_memory: bool = False
+    ) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """
         Parse a PDF into [(page_no, text), ...] with 0-based page numbers.
         - Block-level filtering (skip headers/footers, page numbers, numbered headings).
         - Aggregates ONE string per page (paragraphs separated by blank line).
         - Detects language from the longest page.
         """
-        doc = fitz.open(filepath)
+        doc = (
+            fitz.open(stream=filepath.read_bytes(), filetype="pdf")
+            if in_memory else fitz.open(filepath)
+        )
         pages: List[Tuple[int, str]] = []
         longest_text: str = ""
 
@@ -208,4 +213,6 @@ class FileParser:
             pdf_path = Path(directory) / f"{filepath.name}.pdf"
             # Do not terminate Word sessions that may contain the user's open work.
             convert(input_path=str(filepath), output_path=str(pdf_path), keep_active=True)
-            return self._parse_pdf_file(pdf_path)
+            # Failed PyMuPDF file opens can retain a Windows handle in the traceback.
+            # Use bytes for converted output so temporary cleanup is independent of it.
+            return self._parse_pdf_file(pdf_path, in_memory=True)

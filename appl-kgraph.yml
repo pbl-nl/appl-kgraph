@@ -14,11 +14,11 @@ dependencies:
   - "matplotlib>=3.10,<4"
   - "networkx>=3.5,<4"
   - "openai>=2.6,<4"
-  - "pymupdf>=1.26,<2"
   - "python-dotenv>=1.1,<2"
   - "pyvis>=0.3.2,<1"
   - "tiktoken>=0.12,<1"
   - "pytest>=9,<10"
   - pip:
+      - "PyMuPDF>=1.26,<2"
       - docx2pdf==0.1.8
       - FlashRank==0.2.10

@@ -4,10 +4,12 @@ import hashlib
 import pytest
 import traceback
 
+pytestmark = pytest.mark.storage_integration
+
 # Direct imports only, per instruction
 pytest.importorskip("chromadb", reason="chromadb is required for storage vector tests")
-from graph.db_storage import Storage, StoragePaths
-import test.examples as examples
+from graph.db_storage import Storage, StoragePaths  # noqa: E402
+import test.examples as examples  # noqa: E402
 
 """
 Comprehensive tests for Storage class, covering add, upsert, delete, and get operations

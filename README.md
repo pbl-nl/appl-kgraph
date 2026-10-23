@@ -129,34 +129,79 @@ If your document collection includes `.docx` files, ensure that **Microsoft Word
 
 ### Python environment setup
 
-1. Open a terminal (Anaconda Prompt or standard shell)
-2. Navigate to the project root
-3. Verify that your active interpreter is Python 3.13 before installing dependencies.
-4. Create a virtual environment with Python 3.13:
+Conda is the supported developer environment, including on PBL Azure Virtual Desktop.
+Run these commands from the repository root in Anaconda Prompt or a shell with
+Conda initialized:
 
-   ```text
-   Windows: py -3.13 -m venv venv
-   macOS/Linux: python3.13 -m venv venv
-   ```
-5. Activate it:
+```sh
+conda env create -f appl-kgraph.yml
+conda activate appl-kgraph
+python --version
+```
 
-   * Windows: `venv\Scripts\activate`
-   * macOS/Linux: `source venv/bin/activate`
-6. Install dependencies:
+The environment includes Python 3.13, the application dependencies, and pytest.
+After dependency changes, update it with:
 
-   ```text
-   pip install -r requirements.txt
-   ```
+```sh
+conda env update -f appl-kgraph.yml --prune
+```
+
+Configure either Azure OpenAI or OpenAI in `.env` as described above.
 
 ---
+
+### Running with Docker
+
+Install Docker Engine or Docker Desktop, then build from the project root:
+
+```sh
+docker build -t appl-kgraph .
+```
+
+Create `.env` using the LLM configuration above. For Docker's `--env-file`,
+write values without surrounding quotes, for example `LLM_PROVIDER=openai`.
+Credentials, local documents, and generated storage are excluded from the image.
+
+Create a `docs` directory and place your documents there. Run the Gradio UI:
+
+```sh
+docker run --rm --name appl-kgraph -p 127.0.0.1:7860:7860 \
+  --env-file .env \
+  --mount type=bind,source="$(pwd)/docs",target=/app/docs \
+  --mount type=volume,source=appl-kgraph-models,target=/app/flashrank_model \
+  appl-kgraph
+```
+
+These examples use a macOS/Linux shell; in Windows PowerShell, replace
+`$(pwd)` with `${PWD}` and enter the command on one line.
+Open [the Gradio UI](http://localhost:7860) and use `/app/docs` as the document
+folder. Paths entered in the UI must refer to paths inside the container.
+The container runs as the nonroot `mambauser`; the mounted documents directory
+must be writable by that user because indexes, graphs, and logs are saved under
+`docs/.appl-kgraph`. These files persist on the host after the container exits.
+The named volume retains downloaded reranker models between runs. Model downloads
+and LLM requests require network access.
+
+To run the interactive command-line pipeline instead:
+
+```sh
+docker run --rm -it --env-file .env \
+  --mount type=bind,source="$(pwd)/docs",target=/app/docs \
+  --mount type=volume,source=appl-kgraph-models,target=/app/flashrank_model \
+  appl-kgraph python graph/main.py /app/docs
+```
+
+The image installs the same `appl-kgraph.yml` Conda environment as local development,
+using Python 3.13. DOCX conversion currently depends on Microsoft Word
+and does not work in this Linux container; convert DOCX files to PDF before
+ingesting them.
 
 ### Running the project
 
 From the project root, run:
 
 ```text
-Windows: py -3.12 graph/main.py
-macOS/Linux: python3.12 graph/main.py
+python graph/main.py
 ```
 
 This will execute the current end-to-end pipeline using the configured retrieval strategy.
@@ -181,4 +226,3 @@ If you use ideas, code, or design patterns from this project in academic or appl
 For questions, feedback, or collaboration inquiries, you can contact the maintainers at:
 
 📧 <a href='mailto:stefan.troost@pbl.nl, k.wittenberg@scp.nl'>Contact link</a>
-

@@ -20,5 +20,5 @@ dependencies:
   - "tiktoken>=0.12,<1"
   - "pytest>=9,<10"
   - pip:
-      - docx2pdf==0.1.8
+      - 'docx2pdf==0.1.8; sys_platform == "win32" or sys_platform == "darwin"'
       - FlashRank==0.2.10

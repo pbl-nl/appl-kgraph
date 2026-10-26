@@ -34,6 +34,7 @@ from project_paths import (
     resolve_project_paths,
 )
 from artifact_cleanup import cleanup_graph_artifacts_best_effort
+from path_utils import stored_path_name
 
 mygraph = nx.Graph()
 _PATHRAG_CACHE: dict[str, PathRAG] = {}
@@ -180,7 +181,7 @@ def refresh_existing_graph_dropdown() -> Any:
 def _doc_names_from_node_data(data: dict[str, Any]) -> set[str]:
     raw_filepaths = str(data.get("filepath", "") or "")
     return {
-        Path(raw_path.strip()).name
+        stored_path_name(raw_path.strip())
         for raw_path in raw_filepaths.split("||")
         if raw_path.strip()
     }
@@ -568,7 +569,7 @@ def render_graph_iframe(graph: nx.Graph, height_px: int = _GRAPH_PANEL_HEIGHT_PX
     for node, data in graph.nodes(data=True):
         node_raw_filepath = data.get("filepath", "") or ""
         node_doc_names = ",\n".join(
-            sorted({Path(p.strip()).name for p in node_raw_filepath.split("||") if p.strip()})
+            sorted({stored_path_name(p.strip()) for p in node_raw_filepath.split("||") if p.strip()})
         )
         node_doc_line = f"doc(s) = {node_doc_names}" if node_doc_names else ""
         node_label = str(data.get("label", node))

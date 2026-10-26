@@ -19,6 +19,7 @@ from prompts import PROMPTS
 from logging_utils import configure_file_logger
 from graph_pickle import load_or_build_graph_snapshot
 from project_paths import ProjectPaths
+from path_utils import stored_path_name
 from answer_generation import AsyncTextAnswerGenerator, generate_answer_async, record_chat_audit
 from query_analysis import AsyncKeywordQueryAnalyzer, analyze_query_async
 import retrieval as stages
@@ -50,7 +51,7 @@ def _filepath_matches_allowed(raw_filepaths: Any, allowed_documents: Optional[se
         token = token.strip()
         if not token:
             continue
-        name = Path(token).name.strip().lower()
+        name = stored_path_name(token).strip().lower()
         if name and name in allowed_documents:
             return True
     return False
@@ -63,9 +64,9 @@ def _chunk_matches_allowed(chunk: Dict[str, Any], allowed_documents: Optional[se
     document_id = str(chunk.get("document_id", "") or "").strip()
     candidates = {
         filename.lower(),
-        Path(filename).name.lower(),
+        stored_path_name(filename).lower(),
         document_id.lower(),
-        Path(document_id).name.lower(),
+        stored_path_name(document_id).lower(),
     }
     candidates.discard("")
     return bool(candidates & allowed_documents)

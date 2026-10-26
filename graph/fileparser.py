@@ -1,11 +1,13 @@
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import uuid
 import fitz
 import logging
-import tempfile
 import mimetypes
 from pathlib import Path
-from docx2pdf import convert
 from typing import List, Tuple, Dict, Any, Union
 from langchain_community.document_loaders import BSHTMLLoader
 from langchain_community.document_loaders import TextLoader
@@ -208,11 +210,52 @@ class FileParser:
         return pages, metadata
     
     def _parse_docx_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
-        """Convert in a private temporary folder and clean up on success or failure."""
-        with tempfile.TemporaryDirectory(prefix="appl-kgraph-docx-") as directory:
-            pdf_path = Path(directory) / f"{filepath.name}.pdf"
-            # Do not terminate Word sessions that may contain the user's open work.
-            convert(input_path=str(filepath), output_path=str(pdf_path), keep_active=True)
-            # Failed PyMuPDF file opens can retain a Windows handle in the traceback.
-            # Use bytes for converted output so temporary cleanup is independent of it.
-            return self._parse_pdf_file(pdf_path, in_memory=True)
+        """Convert outside the source folder and clean up even if parsing fails."""
+        with tempfile.TemporaryDirectory(prefix="appl-kgraph-docx-") as output_dir:
+            path_to_pdf = self.convert_docx_to_pdf(str(filepath), output_dir)
+            # Failed file-backed opens can retain a Windows handle in the traceback.
+            return self._parse_pdf_file(Path(path_to_pdf), in_memory=True)
+        
+    def convert_docx_to_pdf(self, docx_path: str, output_dir: Union[str, Path]) -> str:
+        """Use Word on Windows/macOS, or headless LibreOffice on Linux.
+
+        The caller owns the output directory and its cleanup.
+        """
+        source = Path(docx_path).expanduser().resolve()
+        destination = Path(output_dir).expanduser().resolve()
+        destination.mkdir(parents=True, exist_ok=True)
+        pdf_path = destination / f"{source.stem}.pdf"
+        if pdf_path.exists():
+            raise FileExistsError(f"Refusing to overwrite converted PDF: {pdf_path}")
+
+        if sys.platform in {"win32", "darwin"}:
+            from docx2pdf import convert
+
+            # Preserve any Word session containing the user's open work.
+            convert(input_path=str(source), output_path=str(pdf_path), keep_active=True)
+        else:
+            executable = shutil.which("libreoffice") or shutil.which("soffice")
+            if executable is None:
+                raise RuntimeError(
+                    "DOCX parsing on Linux requires LibreOffice Writer. "
+                    "Install libreoffice-writer and ensure libreoffice or soffice is on PATH."
+                )
+            # A separate profile prevents concurrent conversions sharing an office instance.
+            with tempfile.TemporaryDirectory(prefix="appl-kgraph-office-") as profile:
+                subprocess.run(
+                    [
+                        executable,
+                        f"-env:UserInstallation={Path(profile).resolve().as_uri()}",
+                        "--headless", "--convert-to", "pdf",
+                        "--outdir", str(destination), str(source),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+
+        # LibreOffice can exit successfully without producing a file.
+        if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
+            raise RuntimeError(f"DOCX conversion did not produce a PDF for {source.name}")
+        return str(pdf_path)

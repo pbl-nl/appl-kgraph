@@ -200,7 +200,8 @@ def remove_document_from_storage(storage, filename: str) -> None:
     rows = extraction_result_from_legacy({"entities": storage.graphdb.list_nodes(),
                                           "relationships": storage.graphdb.list_edges()})
     delta = remove_graph_sources(GraphView(rows.entities, rows.relations), chunk_ids,
-                                 filepath=document.get("filepath", ""), delimiter=settings.ingestion.delimiter)
+                                 filepath=document.get("filepath", ""), filename=filename,
+                                 delimiter=settings.ingestion.delimiter)
     persist_graph(delta, SQLiteGraphStore(storage))
     index_graph(delta, StorageVectorIndex(storage))
     for chunk_id in chunk_ids:

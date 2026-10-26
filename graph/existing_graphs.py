@@ -7,6 +7,7 @@ from db_storage import DocumentsDB
 from graph_pickle import load_graph_from_pickle
 from project_paths import resolve_project_paths
 from settings import settings
+from path_utils import stored_path_name
 
 
 _DOCS_ROOT = Path(__file__).resolve().parents[1] / settings.project.documents_root_dirname
@@ -60,6 +61,6 @@ def stored_document_names(folder_path: str) -> List[str]:
                 for raw_path in raw_filepaths.split("||"):
                     token = raw_path.strip()
                     if token:
-                        names.add(Path(token).name)
+                        names.add(stored_path_name(token))
 
     return sorted(names, key=str.lower)

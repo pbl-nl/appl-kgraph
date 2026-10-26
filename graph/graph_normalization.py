@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from schemas import Entity, ExtractionResult, GraphDelta, Relation
+from path_utils import stored_path_name
 
 
 DEFAULT_DELIMITER = "||"
@@ -219,14 +220,23 @@ def normalize_graph(
     )
 
 
-def remove_graph_sources(existing: GraphView, source_ids: Sequence[str], *, filepath: str = "", delimiter: str = DEFAULT_DELIMITER) -> GraphDelta:
+def remove_graph_sources(existing: GraphView, source_ids: Sequence[str], *, filepath: str = "", filename: str = "", delimiter: str = DEFAULT_DELIMITER) -> GraphDelta:
     """Pure source removal: retain shared records and explicitly delete exhausted ones."""
     from dataclasses import replace
     removed = set(source_ids)
+    filename_key = filename.strip().casefold()
+
+    def matches_document(token):
+        return (
+            bool(filepath) and token.casefold() == filepath.casefold()
+        ) or (
+            bool(filename_key) and stored_path_name(token).strip().casefold() == filename_key
+        )
+
     def update(item):
         sources = tuple(source for source in item.source_ids if source not in removed)
         paths = delimiter.join(token for token in _text_parts([item.filepath or ""], delimiter)
-                               if not filepath or token.casefold() != filepath.casefold())
+                               if not matches_document(token))
         return replace(item, source_ids=sources, filepath=paths or None)
     affected_entities = [item for item in existing.entities if removed.intersection(item.source_ids)]
     affected_relations = [item for item in existing.relations if removed.intersection(item.source_ids)]

@@ -168,3 +168,26 @@ def test_relation_only_update_preserves_shared_endpoints_when_old_source_is_remo
     assert {entity.name for entity in removed.entities} == {"Alpha", "Beta"}
     assert all(entity.source_ids == ("new",) and entity.filepath == "new.txt" for entity in removed.entities)
     assert upserts.relations[0].source_ids == ("new",)
+
+
+@pytest.mark.parametrize("old_path, current_path", [
+    (r"C:\old\ALPHA.txt", "/new/location/alpha.txt"),
+    ("/old/location/alpha.txt", r"C:\new\alpha.txt"),
+    (r"\\server\share\alpha.txt", ""),
+])
+def test_remove_graph_sources_prunes_moved_paths_on_shared_records(old_path, current_path):
+    from graph_normalization import remove_graph_sources
+
+    provenance = dict(source_ids=("old", "keep"), filepath=f"{old_path}||/new/beta.txt")
+    existing = GraphView(
+        entities=[Entity(name="Alpha", type="Thing", description="Shared", **provenance)],
+        relations=[Relation(source_name="Alpha", target_name="Beta", description="Shared", **provenance)],
+    )
+
+    delta = remove_graph_sources(existing, ["old"], filepath=current_path, filename="alpha.txt")
+
+    assert not delta.deleted_entity_names and not delta.deleted_relation_pairs
+    for item in (*delta.entities, *delta.relations):
+        assert item.source_ids == ("keep",)
+        assert item.filepath == "/new/beta.txt"
+    assert existing.entities[0].source_ids == ("old", "keep")

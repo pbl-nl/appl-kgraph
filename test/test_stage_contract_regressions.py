@@ -1,4 +1,6 @@
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,7 +121,8 @@ def test_docx_conversion_preserves_source_neighbors_and_cleans_temporary_files(
                 pdf.new_page().insert_text((72, 72), "Alpha works with Beta.")
                 pdf.save(pdf_path)
 
-    monkeypatch.setattr(fileparser, "convert", convert)
+    monkeypatch.setattr(fileparser, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setitem(sys.modules, "docx2pdf", SimpleNamespace(convert=convert))
     if broken_pdf:
         with pytest.raises(DocumentParseError):
             parse_document(DocumentRef(source), FileDocumentParser())

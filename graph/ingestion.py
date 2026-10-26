@@ -24,6 +24,7 @@ from project_paths import (
     resolve_project_paths,
 )
 import hashlib
+from path_utils import stored_path_name
 
 
 LOGGER = configure_file_logger(
@@ -606,7 +607,7 @@ def remove_document_from_storage(storage: Storage, filename: str) -> None:
             return False
         if doc_filepath and raw == doc_filepath:
             return True
-        token_name = Path(raw).name.strip().lower()
+        token_name = stored_path_name(raw).strip().lower()
         return bool(filename_lower and token_name == filename_lower)
 
     def _prune_filepath_tokens(tokens: List[str]) -> str:

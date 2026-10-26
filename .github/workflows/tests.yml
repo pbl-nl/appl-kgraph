@@ -15,9 +15,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-    defaults:
-      run:
-        shell: bash -el {0}
     env:
       MPLBACKEND: Agg
       GRADIO_ANALYTICS_ENABLED: "False"
@@ -28,10 +25,13 @@ jobs:
           miniforge-version: latest
           environment-file: appl-kgraph.yml
           activate-environment: appl-kgraph
+          # Avoid conda init failures on Windows; use conda run below.
+          run-init: "false"
+          remove-profiles: "false"
       - name: Install Linux DOCX converter
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libreoffice-writer
       - name: Test
-        run: python -m pytest test -q
+        run: conda run --no-capture-output -n appl-kgraph python -m pytest test -q

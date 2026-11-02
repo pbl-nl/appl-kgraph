@@ -4,9 +4,9 @@ import gc
 import html
 import inspect
 import queue
-import tempfile
 import threading
 from pathlib import Path
+from path_utils import source_filename
 from typing import Any, Iterator, List, Optional, Tuple
 
 import gradio as gr
@@ -180,7 +180,7 @@ def refresh_existing_graph_dropdown() -> Any:
 def _doc_names_from_node_data(data: dict[str, Any]) -> set[str]:
     raw_filepaths = str(data.get("filepath", "") or "")
     return {
-        Path(raw_path.strip()).name
+        source_filename(raw_path.strip())
         for raw_path in raw_filepaths.split("||")
         if raw_path.strip()
     }
@@ -568,7 +568,7 @@ def render_graph_iframe(graph: nx.Graph, height_px: int = _GRAPH_PANEL_HEIGHT_PX
     for node, data in graph.nodes(data=True):
         node_raw_filepath = data.get("filepath", "") or ""
         node_doc_names = ",\n".join(
-            sorted({Path(p.strip()).name for p in node_raw_filepath.split("||") if p.strip()})
+            sorted({source_filename(p.strip()) for p in node_raw_filepath.split("||") if p.strip()})
         )
         node_doc_line = f"doc(s) = {node_doc_names}" if node_doc_names else ""
         node_label = str(data.get("label", node))
@@ -623,9 +623,7 @@ def render_graph_iframe(graph: nx.Graph, height_px: int = _GRAPH_PANEL_HEIGHT_PX
         }
     """)
 
-    tmp_path = Path(tempfile.gettempdir()) / "appl_kgraph_graph.html"
-    net.save_graph(str(tmp_path))
-    rendered = tmp_path.read_text(encoding="utf-8")
+    rendered = net.generate_html()
     legend_overlay = _legend_overlay_html(type_colors)
     if legend_overlay:
         if "</body>" in rendered:
@@ -1123,7 +1121,7 @@ with gr.Blocks() as demo:
             elem_id="graph-source-inline",
         )
         with gr.Group(visible=True) as ingest_controls:
-            folder_path_input = gr.Textbox(label="Document folder", placeholder="C:\\path\\to\\documents")
+            folder_path_input = gr.Textbox(label="Document folder", placeholder="Path to your documents folder (for example, docs)")
             ingest_file_filter = gr.CheckboxGroup(
                 choices=[],
                 value=[],

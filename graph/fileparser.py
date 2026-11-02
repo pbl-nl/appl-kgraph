@@ -5,7 +5,7 @@ import logging
 import tempfile
 import mimetypes
 from pathlib import Path
-from docx2pdf import convert
+from docx_conversion import convert_docx_to_pdf
 from typing import List, Tuple, Dict, Any, Union
 from langchain_community.document_loaders import BSHTMLLoader
 from langchain_community.document_loaders import TextLoader
@@ -211,8 +211,7 @@ class FileParser:
         """Convert in a private temporary folder and clean up on success or failure."""
         with tempfile.TemporaryDirectory(prefix="appl-kgraph-docx-") as directory:
             pdf_path = Path(directory) / f"{filepath.name}.pdf"
-            # Do not terminate Word sessions that may contain the user's open work.
-            convert(input_path=str(filepath), output_path=str(pdf_path), keep_active=True)
+            convert_docx_to_pdf(filepath, pdf_path)
             # Failed PyMuPDF file opens can retain a Windows handle in the traceback.
             # Use bytes for converted output so temporary cleanup is independent of it.
             return self._parse_pdf_file(pdf_path, in_memory=True)

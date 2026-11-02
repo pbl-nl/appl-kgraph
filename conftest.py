@@ -7,10 +7,25 @@ import pytest
 
 
 _SETTINGS_PREFIXES = (
-    "OPENAI_", "AZURE_OPENAI_", "LLM_", "CHAT_", "EMBEDDING_", "PROMPT_",
-    "MERGE_", "DESCRIPTION_", "CHUNK_", "CHUNKS_", "DOCUMENTS_", "GRAPH_",
-    "CHROMA_", "PROJECT_", "EXTRACTION_", "AUDIT_", "VERBOSITY_",
-    "INTERNAL_LOG", "RETRIEVAL_",
+    "OPENAI_",
+    "AZURE_OPENAI_",
+    "LLM_",
+    "CHAT_",
+    "EMBEDDING_",
+    "PROMPT_",
+    "MERGE_",
+    "DESCRIPTION_",
+    "CHUNK_",
+    "CHUNKS_",
+    "DOCUMENTS_",
+    "GRAPH_",
+    "CHROMA_",
+    "PROJECT_",
+    "EXTRACTION_",
+    "AUDIT_",
+    "VERBOSITY_",
+    "INTERNAL_LOG",
+    "RETRIEVAL_",
 )
 _PROVIDER_ENV = {
     "openai": {

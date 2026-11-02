@@ -240,6 +240,8 @@ class ExtractionResult:
 class GraphDelta:
     entities: List[Entity] = field(default_factory=list)
     relations: List[Relation] = field(default_factory=list)
+    deleted_entity_names: Tuple[str, ...] = field(default_factory=tuple)
+    deleted_relation_pairs: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -256,6 +258,23 @@ class GraphDelta:
         ]
         if len(set(relation_pairs)) != len(relation_pairs):
             raise ValueError("GraphDelta relation pairs must be unique")
+        deleted_entity_names = tuple(self.deleted_entity_names)
+        for name in deleted_entity_names:
+            _require_identifier(name, "deleted entity name")
+        if len(set(deleted_entity_names)) != len(deleted_entity_names):
+            raise ValueError("deleted entity names must be unique")
+        deleted_relation_pairs = tuple(
+            tuple(sorted(pair)) for pair in self.deleted_relation_pairs
+        )
+        for pair in deleted_relation_pairs:
+            if len(pair) != 2:
+                raise ValueError("deleted relation pairs must contain two names")
+            _require_identifier(pair[0], "deleted relation source name")
+            _require_identifier(pair[1], "deleted relation target name")
+        if len(set(deleted_relation_pairs)) != len(deleted_relation_pairs):
+            raise ValueError("deleted relation pairs must be unique")
+        object.__setattr__(self, "deleted_entity_names", deleted_entity_names)
+        object.__setattr__(self, "deleted_relation_pairs", deleted_relation_pairs)
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
@@ -266,10 +285,37 @@ class QueryPlan:
     high_level_keywords: List[str] = field(default_factory=list)
     low_level_keywords: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    strategy: str = "generic"
+    mode: Optional[str] = None
+    seed_entities: Tuple[str, ...] = field(default_factory=tuple)
+    settings: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):
             raise TypeError("query must be a string")
+        history = tuple(tuple(turn) for turn in self.history)
+        for turn in history:
+            if len(turn) != 2 or not all(isinstance(value, str) for value in turn):
+                raise TypeError("history must contain string (role, message) pairs")
+        high_level_keywords = list(self.high_level_keywords)
+        low_level_keywords = list(self.low_level_keywords)
+        if not all(isinstance(value, str) for value in high_level_keywords):
+            raise TypeError("high_level_keywords must contain strings")
+        if not all(isinstance(value, str) for value in low_level_keywords):
+            raise TypeError("low_level_keywords must contain strings")
+        _require_identifier(self.strategy, "query strategy")
+        if self.mode is not None and not isinstance(self.mode, str):
+            raise TypeError("query mode must be a string or None")
+        seed_entities = tuple(self.seed_entities)
+        for name in seed_entities:
+            _require_identifier(name, "seed entity")
+        if len(set(seed_entities)) != len(seed_entities):
+            raise ValueError("seed entities must be unique")
+        object.__setattr__(self, "history", history)
+        object.__setattr__(self, "high_level_keywords", high_level_keywords)
+        object.__setattr__(self, "low_level_keywords", low_level_keywords)
+        object.__setattr__(self, "seed_entities", seed_entities)
+        object.__setattr__(self, "settings", _owned_metadata(self.settings))
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
@@ -354,9 +400,31 @@ class RetrievalCandidates:
 
 
 @dataclass(frozen=True)
+class ContextWindow:
+    label: str
+    text: str
+    score: float = 0.0
+    source_refs: Tuple[str, ...] = field(default_factory=tuple)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.label, "context window label")
+        if not isinstance(self.text, str):
+            raise TypeError("context window text must be a string")
+        object.__setattr__(self, "score", _finite_score(self.score))
+        source_refs = tuple(self.source_refs)
+        for source_ref in source_refs:
+            _require_identifier(source_ref, "context window source reference")
+        if len(set(source_refs)) != len(source_refs):
+            raise ValueError("context window source references must be unique")
+        object.__setattr__(self, "source_refs", source_refs)
+        object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
+
+@dataclass(frozen=True)
 class RetrievedContext:
     query_plan: QueryPlan
-    context_windows: List[Any] = field(default_factory=list)
+    context_windows: List[ContextWindow] = field(default_factory=list)
     entities: List[Entity] = field(default_factory=list)
     relations: List[Relation] = field(default_factory=list)
     chunks: List[Chunk] = field(default_factory=list)
@@ -365,6 +433,16 @@ class RetrievedContext:
     def __post_init__(self) -> None:
         if not isinstance(self.query_plan, QueryPlan):
             raise TypeError("query_plan must be a QueryPlan")
+        if not all(
+            isinstance(window, ContextWindow) for window in self.context_windows
+        ):
+            raise TypeError("context_windows must contain ContextWindow objects")
+        if not all(isinstance(entity, Entity) for entity in self.entities):
+            raise TypeError("entities must contain Entity objects")
+        if not all(isinstance(relation, Relation) for relation in self.relations):
+            raise TypeError("relations must contain Relation objects")
+        if not all(isinstance(chunk, Chunk) for chunk in self.chunks):
+            raise TypeError("chunks must contain Chunk objects")
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
 
 
@@ -384,6 +462,50 @@ class AnswerResult:
             raise TypeError("model must be a mapping")
         object.__setattr__(self, "model", deepcopy(dict(self.model)))
         object.__setattr__(self, "metadata", _owned_metadata(self.metadata))
+
+
+@dataclass(frozen=True)
+class IngestedDocument:
+    ref: DocumentRef
+    doc_id: str
+    chunk_count: int
+    entity_count: int
+    relation_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ref, DocumentRef):
+            raise TypeError("ref must be a DocumentRef")
+        _require_identifier(self.doc_id, "doc_id")
+        _require_non_negative_integer(self.chunk_count, "chunk_count")
+        _require_non_negative_integer(self.entity_count, "entity_count")
+        _require_non_negative_integer(self.relation_count, "relation_count")
+
+
+@dataclass(frozen=True)
+class IngestionSummary:
+    documents: Tuple[IngestedDocument, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        documents = tuple(self.documents)
+        if not all(isinstance(document, IngestedDocument) for document in documents):
+            raise TypeError("documents must contain IngestedDocument objects")
+        object.__setattr__(self, "documents", documents)
+
+    @property
+    def processed_files(self) -> int:
+        return len(self.documents)
+
+    @property
+    def chunk_count(self) -> int:
+        return sum(document.chunk_count for document in self.documents)
+
+    @property
+    def entity_count(self) -> int:
+        return sum(document.entity_count for document in self.documents)
+
+    @property
+    def relation_count(self) -> int:
+        return sum(document.relation_count for document in self.documents)
 
 
 _ENTITY_LEGACY_FIELDS = {

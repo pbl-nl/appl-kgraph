@@ -1,9 +1,8 @@
-import os
 import re
 import uuid
 import fitz
 import logging
-import time
+import tempfile
 import mimetypes
 from pathlib import Path
 from docx2pdf import convert
@@ -76,10 +75,10 @@ class FileParser:
                 pages, file_metadata = self._parse_pdf_file(filepath)
             elif extension == '.docx':
                 pages, file_metadata = self._parse_docx_file(filepath)
-        #if any error happens return none
+        # Propagate failures so the typed parser can report the source and cause.
         except Exception as e:
             LOGGER.warning("Error parsing file %s: %s", filepath, e)
-            return [], {}
+            raise
 
         # Merge file-specific metadata
         metadata.update(file_metadata)
@@ -109,13 +108,13 @@ class FileParser:
     
     def _parse_html_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """Parse HTML files"""
-        bs_kwargs = {"features": "lxml"}  # Use lxml parser if available
+        # Use BeautifulSoup's standard-library backend; lxml is optional.
+        encoding = "utf-8-sig"
         try:
-            loader = BSHTMLLoader(filepath, bs_kwargs=bs_kwargs)
-        except Exception:
-            # Fallback to default parser if lxml not available
-            LOGGER.warning("lxml parser not available, falling back to default HTML parser")
-            loader = BSHTMLLoader(filepath, open_encoding='utf-8')
+            filepath.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            encoding = "cp1252"
+        loader = BSHTMLLoader(filepath, open_encoding=encoding, bs_kwargs={"features": "html.parser"})
         data = loader.load()
         raw_text = data[0].page_content.replace('\n', '')
         pages = [(0, raw_text)]
@@ -123,14 +122,19 @@ class FileParser:
 
         return pages, metadata
     
-    def _parse_pdf_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
+    def _parse_pdf_file(
+        self, filepath: Path, *, in_memory: bool = False
+    ) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
         """
         Parse a PDF into [(page_no, text), ...] with 0-based page numbers.
         - Block-level filtering (skip headers/footers, page numbers, numbered headings).
         - Aggregates ONE string per page (paragraphs separated by blank line).
         - Detects language from the longest page.
         """
-        doc = fitz.open(filepath)
+        doc = (
+            fitz.open(stream=filepath.read_bytes(), filetype="pdf")
+            if in_memory else fitz.open(filepath)
+        )
         pages: List[Tuple[int, str]] = []
         longest_text: str = ""
 
@@ -204,33 +208,11 @@ class FileParser:
         return pages, metadata
     
     def _parse_docx_file(self, filepath: Path) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
-        """Parse DOCX files"""
-        path_to_pdf = self.convert_docx_to_pdf(str(filepath))
-        pages, metadata = self._parse_pdf_file(Path(path_to_pdf))
-        os.remove(path_to_pdf)  # Clean up the temporary PDF file
-        return pages, metadata
-        
-    def convert_docx_to_pdf(self, docx_path: str) -> str:
-        """
-        converts a Word file (.docx) to a pdf file and stores the pdf file in subfolder "conversions"
-
-        Parameters
-        ----------
-        docx_path : str
-            path of Word file to parse
-
-        Returns
-        -------
-        str
-            path of output pdf file
-        """
-        folder, file = os.path.split(docx_path)
-        pdf_file = file + '.pdf'
-        pdf_path = os.path.join(folder, pdf_file)
-        
-        # Ensure word app is not running
-        os.system("taskkill /f /im WINWORD.EXE 2>nul")
-        time.sleep(2)  # Give it time to close
-        convert(input_path=docx_path, output_path=pdf_path, keep_active=False)
-
-        return pdf_path
+        """Convert in a private temporary folder and clean up on success or failure."""
+        with tempfile.TemporaryDirectory(prefix="appl-kgraph-docx-") as directory:
+            pdf_path = Path(directory) / f"{filepath.name}.pdf"
+            # Do not terminate Word sessions that may contain the user's open work.
+            convert(input_path=str(filepath), output_path=str(pdf_path), keep_active=True)
+            # Failed PyMuPDF file opens can retain a Windows handle in the traceback.
+            # Use bytes for converted output so temporary cleanup is independent of it.
+            return self._parse_pdf_file(pdf_path, in_memory=True)

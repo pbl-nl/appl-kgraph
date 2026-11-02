@@ -4,16 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, asdict, replace
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from pathlib import Path
 
 import networkx as nx
-import tiktoken
 from flashrank import Ranker, RerankRequest
 
-from settings import settings
+from settings import settings, RetrievalSettings
 from db_storage import Storage
 from db_storage import StoragePaths
 from llm import Chat
@@ -21,7 +19,11 @@ from prompts import PROMPTS
 from logging_utils import configure_file_logger
 from graph_pickle import load_or_build_graph_snapshot
 from project_paths import ProjectPaths
-from query_logging import write_audit_log
+from answer_generation import AsyncTextAnswerGenerator, generate_answer_async, record_chat_audit
+from query_analysis import AsyncKeywordQueryAnalyzer, analyze_query_async
+import retrieval as stages
+from schemas import AnswerResult, retrieval_candidates_from_legacy
+from context_serialization import context_from_candidates, light_prompt_rows
 
 
 LOGGER = logging.getLogger("LightRAG")
@@ -72,48 +74,11 @@ def _chunk_matches_allowed(chunk: Dict[str, Any], allowed_documents: Optional[se
 # Verbosity helper
 # ---------------------------------------------------------------------------
 
-def render_full_context(result: RetrievalResult) -> str:
-    """Render full context for debugging purposes."""
-    lines = []
-
-    # 1) Entities
-    lines.append("\n== ENTITY CONTEXT ==")
-    if result.entities_context:
-        for i, e in enumerate(result.entities_context, 1):
-            lines.append(
-                f"{i}. {e.get('entity', 'N/A')} [{e.get('type', 'unknown')}]\n"
-                f"   {e.get('description', '(no description)')}\n"
-                f"   File: {e.get('file_path', 'N/A')}"
-            )
-    else:
-        lines.append("(none)")
-
-    # 2) Relations
-    lines.append("\n== RELATION CONTEXT ==")
-    if result.relations_context:
-        for i, r in enumerate(result.relations_context, 1):
-            lines.append(
-                f"{i}. {r.get('entity1', 'N/A')} ↔ {r.get('entity2', 'N/A')}\n"
-                f"   {r.get('description', '(no description)')}\n"
-                f"   File: {r.get('file_path', 'N/A')}"
-            )
-    else:
-        lines.append("(none)")
-
-    # 3) Chunks
-    lines.append("\n== ALL CHUNKS ==")
-    if result.all_chunks:
-        for i, c in enumerate(result.all_chunks, 1):
-            source = c.get('source_type', 'unknown')
-            lines.append(
-                f"{i}. [{source}] {c.get('id', 'N/A')}\n"
-                f"   Order: {c.get('order', 'N/A')}, Relation: {c.get('relation', 'N/A')}\n"
-                f"   Text: {c.get('text', '')[:100]}..."
-            )
-    else:
-        lines.append("(none)")
-
-    return "\n".join(lines)
+def render_full_context(result: AnswerResult) -> str:
+    entities, relations, chunks = light_prompt_rows(result.context)
+    return "\n".join(["== ENTITY CONTEXT ==", json.dumps(entities, ensure_ascii=False),
+                      "== RELATION CONTEXT ==", json.dumps(relations, ensure_ascii=False),
+                      "== ALL CHUNKS ==", json.dumps(chunks, ensure_ascii=False)])
 
 # ---------------------------------------------------------------------------
 # Logging and token helpers
@@ -126,33 +91,6 @@ def set_logger(log_file: Path) -> None:
         level=settings.logging.internal_log_level,
         enabled=settings.logging.internal_logging_enabled,
     )
-
-
-@lru_cache(maxsize=4)
-def _encoder(model: str) -> tiktoken.Encoding:
-    return tiktoken.encoding_for_model(model)
-
-
-def count_tokens(text: str, model: str) -> int:
-    if not text:
-        return 0
-    return len(_encoder(model).encode(text))
-
-
-# def truncate_by_tokens(list_dict: List[Dict[str, Any]], max_tokens: int, model: str) -> List[Dict[str, Any]]:
-#     if max_tokens <= 0:
-#         return []
-#     tokens = 0
-#     for i, item in enumerate(list_dict):
-#         item_tokens = count_tokens(str(item), model)
-#         tokens += item_tokens
-#         if tokens > max_tokens:
-#             return list_dict[:i]
-#     return list_dict
-
-
-def join_non_empty(parts: Iterable[str], delimiter: str = "\n") -> str:
-    return delimiter.join(part for part in parts if part)
 
 
 def get_conversation_turns(
@@ -169,7 +107,7 @@ def get_conversation_turns(
     Returns:
         Formatted conversation history string
     """
-    if not history:
+    if not history or max_turns <= 0:
         return ""
 
     # Keep only the last N turns
@@ -186,17 +124,6 @@ def get_conversation_turns(
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class RetrievalResult:
-    """Structured output returned by LightRAG."""
-    answer: str
-    entities_context: List[Dict[str, Any]]
-    relations_context: List[Dict[str, Any]]
-    all_chunks: List[Dict[str, Any]]
-    hl_keywords: List[str]
-    ll_keywords: List[str]
-
 
 @dataclass(frozen=True)
 class GraphSnapshot:
@@ -287,6 +214,7 @@ class StorageAdapter:
             if not isinstance(metadata, dict):
                 continue
             matches.append({
+                **metadata,
                 "chunk_uuid": str(metadata.get("chunk_uuid", "")),
                 "document_id": str(metadata.get("doc_id", "")),
                 "filename": str(metadata.get("filename", "")),
@@ -300,41 +228,11 @@ class StorageAdapter:
         chunks = self._storage.chunksdb.get_chunk_by_uuid(chunk_uuid)
         return chunks[0] if chunks else None
 
-    def get_chunks_by_uuids(self, chunk_uuids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Get multiple chunks by their UUIDs from the database."""
-        chunks = self._storage.chunksdb.get_chunks_by_uuids(chunk_uuids)
-        return {c["chunk_uuid"]: c for c in chunks}
-
-    @staticmethod
-    def _as_list(value: Any) -> List[Any]:
-        if value is None:
-            return []
-        if isinstance(value, dict):
-            return [value]
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            return list(value)
-        return [value]
-
     def close(self) -> None:
         close_method = getattr(self._storage, "close", None)
         if callable(close_method):
             close_method()
         self._graph_snapshot = None
-
-
-def _distance_to_similarity(value: Any) -> float:
-    """Convert distance to similarity score."""
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        for item in value:
-            try:
-                return max(0.0, 1.0 - float(item))
-            except (TypeError, ValueError):
-                continue
-        return 0.0
-    try:
-        return max(0.0, 1.0 - float(value))
-    except (TypeError, ValueError):
-        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +271,7 @@ async def extract_keywords(
     query: str,
     conversation_history: Optional[List[Tuple[str, str]]] = None,
     history_turns: int = 4,
+    *, config: RetrievalSettings | None = None,
 ) -> Tuple[List[str], List[str]]:
     """
     Extract high-level and low-level keywords from the query.
@@ -386,6 +285,7 @@ async def extract_keywords(
     Returns:
         Tuple of (hl_keywords, ll_keywords)
     """
+    config = config or settings.retrieval
     examples = "\n".join(PROMPTS["keywords_extraction_examples"])
     language = settings.prompts.default_language
     history_context = get_conversation_turns(conversation_history, history_turns)
@@ -399,15 +299,20 @@ async def extract_keywords(
 
     response = await chat.generate(
         prompt,
-        temperature=settings.retrieval.llm_temperature,
-        max_tokens=settings.retrieval.llm_max_tokens,
+        temperature=config.llm_temperature,
+        max_tokens=config.llm_max_tokens,
     )
 
     # Parse JSON response
     try:
         result = json.loads(response.strip())
+        if not isinstance(result, dict):
+            return [], []
         hl_keywords = result.get("high_level_keywords", [])
         ll_keywords = result.get("low_level_keywords", [])
+        if not all(isinstance(values, list) and all(isinstance(value, str) for value in values)
+                   for values in (hl_keywords, ll_keywords)):
+            return [], []
         return hl_keywords, ll_keywords
     except json.JSONDecodeError as e:
         LOGGER.warning(f"Failed to parse keywords JSON: {e}. Response: {response}")
@@ -422,17 +327,17 @@ def get_node_data(
     adapter: StorageAdapter,
     ll_keywords: List[str],
     top_k: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Query entity vectors with low-level keywords and build node-based context.
 
     Returns:
-        Tuple of (node_datas, use_relations, entities_context1, relations_context1)
+        Tuple of (node_datas, use_relations) before context construction
     """
     # Query entity vectors with concatenated ll_keywords
     ll_query = ", ".join(ll_keywords) if ll_keywords else ""
     if not ll_query:
-        return [], [], [], []
+        return [], []
 
     entity_matches = adapter.query_entities(ll_query, limit=top_k)
 
@@ -486,47 +391,24 @@ def get_node_data(
     # Sort use_relations by (rank, weight) descending
     use_relations.sort(key=lambda x: (x.get("rank", 0), x.get("weight", 0)), reverse=True)
 
-    # Build entities_context1
-    entities_context1 = []
-    for idx, node in enumerate(node_datas):
-        entities_context1.append({
-            "id": idx + 1,
-            "entity": node.get("name", ""),
-            "type": node.get("type", ""),
-            "description": node.get("description", ""),
-            "file_path": node.get("filepath", ""),
-        })
-
-    # Build relations_context1
-    relations_context1 = []
-    for idx, edge in enumerate(use_relations):
-        relations_context1.append({
-            "id": idx + 1,
-            "entity1": edge.get("u_source", ""),
-            "entity2": edge.get("u_target", ""),
-            "type": edge.get("type", ""),
-            "description": edge.get("description", ""),
-            "file_path": edge.get("filepath", ""),
-        })
-
-    return node_datas, use_relations, entities_context1, relations_context1
+    return node_datas, use_relations
 
 
 def get_edge_data(
     adapter: StorageAdapter,
     hl_keywords: List[str],
     top_k: int
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Query relation vectors with high-level keywords and build edge-based context.
 
     Returns:
-        Tuple of (edge_datas, use_entities, entities_context2, relations_context2)
+        Tuple of (edge_datas, use_entities) before context construction
     """
     # Query relation vectors with concatenated hl_keywords
     hl_query = ", ".join(hl_keywords) if hl_keywords else ""
     if not hl_query:
-        return [], [], [], []
+        return [], []
 
     relation_matches = adapter.query_relations(hl_query, limit=top_k)
 
@@ -578,30 +460,7 @@ def get_edge_data(
 
                 use_entities.append(node_info)
 
-    # Build entities_context2
-    entities_context2 = []
-    for idx, node in enumerate(use_entities):
-        entities_context2.append({
-            "id": idx + 1,
-            "entity": node.get("name", ""),
-            "type": node.get("type", ""),
-            "description": node.get("description", ""),
-            "file_path": node.get("filepath", ""),
-        })
-
-    # Build relations_context2
-    relations_context2 = []
-    for idx, edge in enumerate(edge_datas):
-        relations_context2.append({
-            "id": idx + 1,
-            "entity1": edge.get("u_source", ""),
-            "entity2": edge.get("u_target", ""),
-            "type": edge.get("type", ""),
-            "description": edge.get("description", ""),
-            "file_path": edge.get("filepath", ""),
-        })
-
-    return edge_datas, use_entities, entities_context2, relations_context2
+    return edge_datas, use_entities
 
 
 def get_vector_context(
@@ -620,6 +479,7 @@ def get_vector_context(
     all_chunks = []
     for chunk in chunk_matches:
         all_chunks.append({
+            **chunk,
             "id": chunk["chunk_uuid"],
             "chunk_uuid": chunk["chunk_uuid"],
             "document_id": chunk.get("document_id", ""),
@@ -654,7 +514,7 @@ def extract_chunks_from_nodes(
         chunk_uuids = node.get("chunk_uuids", [])
 
         # Take top_k chunk_uuids
-        for chunk_uuid in chunk_uuids:#[:top_k_chunks]:
+        for chunk_uuid in chunk_uuids[:top_k_chunks]:
             # Calculate relation_score: count neighbors with same chunk_uuid
             relation_score = 0
             if name in graph:
@@ -679,6 +539,7 @@ def extract_chunks_from_nodes(
         chunk = adapter.get_chunk_by_uuid(item["chunk_uuid"])
         if chunk:
             result_chunks.append({
+                **chunk,
                 "id": chunk["chunk_uuid"],
                 "chunk_uuid": chunk["chunk_uuid"],
                 "document_id": chunk.get("doc_id", ""),
@@ -712,7 +573,7 @@ def extract_chunks_from_edges(
         chunk_uuids = edge.get("chunk_uuids", [])
 
         # Take top_k chunk_uuids
-        for chunk_uuid in chunk_uuids:#[:top_k_chunks]:
+        for chunk_uuid in chunk_uuids[:top_k_chunks]:
             # Only assign index on first occurrence
             if chunk_uuid not in chunk_index_map:
                 chunk_index_map[chunk_uuid] = edge_idx
@@ -723,6 +584,7 @@ def extract_chunks_from_edges(
         chunk = adapter.get_chunk_by_uuid(chunk_uuid)
         if chunk:
             result_chunks.append({
+                **chunk,
                 "id": chunk["chunk_uuid"],
                 "chunk_uuid": chunk["chunk_uuid"],
                 "document_id": chunk.get("doc_id", ""),
@@ -739,8 +601,9 @@ def rerank(
     query: str,
     retrieved_docs: List[Dict[str, Any]],
     top_n: int,
-    text_key: str = "text"
-) -> List[Dict[str, Any]]:
+    text_key: str = "text",
+    *, config: RetrievalSettings | None = None,
+) -> List[int]:
     """
     Rerank retrieved documents using FlashRank.
     
@@ -756,184 +619,89 @@ def rerank(
     if not retrieved_docs:
         return []
     
-    # Initialize ranker
+    # Initialize ranker using the query settings captured before retrieval.
+    config = config or settings.retrieval
     ranker = Ranker(
-        model_name=settings.retrieval.rerank_model_name,
-        cache_dir=settings.retrieval.rerank_cache_dir
+        model_name=config.rerank_model_name,
+        cache_dir=config.rerank_cache_dir
     )
     
     # Create rerank request
     rerank_request = RerankRequest(
         query=query, 
-        passages=[{"text": doc.get(text_key, "")} for doc in retrieved_docs]
+        passages=[{"id": index, "text": doc.get(text_key, "")} for index, doc in enumerate(retrieved_docs)]
     )
     
     # Get reranked results
     results = ranker.rerank(rerank_request)
     
-    # Map back to original indices
-    reranked_idx = []
-    text_list = [doc.get(text_key, "") for doc in retrieved_docs]
-    for result in results[:top_n]:
-        idx = text_list.index(result["text"])
-        reranked_idx.append(idx)
-    
-    return reranked_idx
+    # IDs preserve distinct evidence records even when their text is identical.
+    return [int(result["id"]) for result in results[:top_n]]
 
 
-def build_context(
-    adapter: StorageAdapter,
-    query: str,
-    hl_keywords: List[str],
-    ll_keywords: List[str],
-    retrieval_mode: str,
-    top_k_entities: int,
-    top_k_relations: int,
-    top_k_chunks: int,
-    top_k_chunk_per_entity: int,
-    allowed_document_names: Optional[Iterable[str]] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Build complete context for the query.
 
-    Returns:
-        Tuple of (entities_context, relations_context, all_chunks)
-    """
+class LightCandidateRetriever:
+    """Vector/graph evidence lookup; leaves deduplication and formatting to context."""
+    def __init__(self, storage):
+        self.storage = storage
 
-    # 2.a) Get node data
-    node_datas, use_relations, entities_context1, relations_context1 = get_node_data(
-        adapter, ll_keywords, top_k_entities
-    ) if retrieval_mode in ("local", "hybrid", "mix") else ([], [], [], [])
+    def retrieve(self, plan):
+        config = RetrievalSettings(**plan.settings)
+        if plan.metadata.get("empty_keywords"):
+            return retrieval_candidates_from_legacy(plan, {})
+        adapter = self.storage
+        nodes, local_edges = get_node_data(adapter, plan.low_level_keywords, config.entity_top_k) if plan.mode in ("local", "hybrid", "mix") else ([], [])
+        edges, global_nodes = get_edge_data(adapter, plan.high_level_keywords, config.relation_top_k) if plan.mode in ("global", "hybrid", "mix") else ([], [])
+        nodes = nodes + global_nodes
+        edges = local_edges + edges
+        allowed = _normalise_document_filter(plan.metadata.get("allowed_document_names"))
+        if allowed:
+            nodes = [row for row in nodes if _filepath_matches_allowed(row.get("filepath"), allowed)]
+            edges = [row for row in edges if _filepath_matches_allowed(row.get("filepath"), allowed)]
+        chunks = get_vector_context(adapter, plan.query, config.chunk_top_k) if plan.mode in ("mix", "naive") else []
+        chunks += extract_chunks_from_nodes(adapter, nodes, config.top_k_chunk_per_entity)
+        chunks += extract_chunks_from_edges(adapter, edges, config.top_k_chunk_per_entity)
+        if allowed:
+            chunks = [row for row in chunks if _chunk_matches_allowed(row, allowed)]
+        return retrieval_candidates_from_legacy(plan, {
+            "entities": [{**row, "source_ids": tuple(row.get("chunk_uuids", ())), "score": row.get("score", 0.0)} for row in nodes],
+            "relations": [{**row, "source_ids": tuple(row.get("chunk_uuids", ())), "score": row.get("score", 0.0)} for row in edges],
+            "chunks": chunks,
+        })
 
-    # 2.b) Get edge data
-    edge_datas, use_entities, entities_context2, relations_context2 = get_edge_data(
-        adapter, hl_keywords, top_k_relations
-    ) if retrieval_mode in ("global", "hybrid", "mix") else ([], [], [], [])
 
-    allowed_documents = _normalise_document_filter(allowed_document_names)
-    if allowed_documents:
-        node_datas = [
-            node for node in node_datas
-            if _filepath_matches_allowed(node.get("filepath", ""), allowed_documents)
-        ]
-        use_relations = [
-            edge for edge in use_relations
-            if _filepath_matches_allowed(edge.get("filepath", ""), allowed_documents)
-        ]
-        entities_context1 = [
-            item for item in entities_context1
-            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
-        ]
-        relations_context1 = [
-            item for item in relations_context1
-            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
-        ]
+class LightContextBuilder:
+    """Pure deterministic context assembly from supplied evidence."""
+    def build(self, plan, candidates):
+        def unique(items, key):
+            seen = set()
+            result = []
+            for item in items:
+                identity = key(item)
+                if identity not in seen:
+                    seen.add(identity)
+                    result.append(item)
+            return result
+        candidates = replace(candidates,
+            entities=unique(candidates.entities, lambda item: item.name),
+            relations=unique(candidates.relations, lambda item: tuple(sorted((item.source_name, item.target_name)))),
+            chunks=unique(candidates.chunks, lambda item: item.chunk_uuid))
+        return context_from_candidates(candidates)
 
-        edge_datas = [
-            edge for edge in edge_datas
-            if _filepath_matches_allowed(edge.get("filepath", ""), allowed_documents)
-        ]
-        use_entities = [
-            node for node in use_entities
-            if _filepath_matches_allowed(node.get("filepath", ""), allowed_documents)
-        ]
-        entities_context2 = [
-            item for item in entities_context2
-            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
-        ]
-        relations_context2 = [
-            item for item in relations_context2
-            if _filepath_matches_allowed(item.get("file_path", ""), allowed_documents)
-        ]
 
-    # 2.c) Get vector context
-    vector_chunks = get_vector_context(adapter, query, top_k_chunks) if retrieval_mode in ("mix", "naive") else []
-    if allowed_documents:
-        vector_chunks = [chunk for chunk in vector_chunks if _chunk_matches_allowed(chunk, allowed_documents)]
-
-    # Combine contexts
-    seen = {e["entity"] for e in entities_context1}
-    unseen = [e for e in entities_context2 if e["entity"] not in seen]
-    entities_context = entities_context1 + unseen
-    for idx, entity in enumerate(entities_context):
-        entity["id"] = str(idx + 1)
-
-    seen = {(r["entity1"], r["entity2"]) for r in relations_context1}
-    unseen = [r for r in relations_context2 if (r["entity1"], r["entity2"]) not in seen]
-    relations_context = relations_context1 + unseen
-    for idx, relation in enumerate(relations_context):
-        relation["id"] = str(idx + 1)
-
-    # Get original node and edge datas (unique only)
-    original_node_datas = list(node_datas)
-    node_names = {n["name"] for n in original_node_datas}
-    for node in use_entities:
-        if node["name"] not in node_names:
-            original_node_datas.append(node)
-            node_names.add(node["name"])
-
-    original_edge_datas = list(use_relations)
-    edge_keys = {tuple(sorted([e["u_source"], e["u_target"]])) for e in original_edge_datas}
-    for edge in edge_datas:
-        edge_key = tuple(sorted([edge["u_source"], edge["u_target"]]))
-        if edge_key not in edge_keys:
-            original_edge_datas.append(edge)
-            edge_keys.add(edge_key)
-
-    # 3.a) Extract chunks from nodes
-    entity_chunks = extract_chunks_from_nodes(adapter, original_node_datas, top_k_chunk_per_entity)
-
-    # 3.b) Extract chunks from edges
-    relationship_chunks = extract_chunks_from_edges(adapter, original_edge_datas, top_k_chunk_per_entity)
-    if allowed_documents:
-        entity_chunks = [chunk for chunk in entity_chunks if _chunk_matches_allowed(chunk, allowed_documents)]
-        relationship_chunks = [chunk for chunk in relationship_chunks if _chunk_matches_allowed(chunk, allowed_documents)]
-
-    # 4) Combine and deduplicate chunks
-    all_chunks = list(vector_chunks)
-    all_chunks.extend(entity_chunks)
-    all_chunks.extend(relationship_chunks)
-    
-    # Deduplicate by chunk UUID
-    seen_uuids = set()
-    deduplicated_chunks = []
-    for chunk in all_chunks:
-        chunk_id = chunk.get("id")
-        if chunk_id and chunk_id not in seen_uuids:
-            seen_uuids.add(chunk_id)
-            deduplicated_chunks.append(chunk)
-    
-    #Rerank by top_k
-    if settings.retrieval.enable_rerank and query and deduplicated_chunks:
-        rerank_top_k = settings.retrieval.rerank_top_k or len(deduplicated_chunks)
-        deduplicated_chunk_ids = rerank(
-            query=query,
-            retrieved_docs=deduplicated_chunks,
-            top_n=rerank_top_k,
-        )
-        LOGGER.info(
-            "Reranked chunks: kept %d chunks after reranking, it was %d before reranking",
-            len(deduplicated_chunk_ids),
-            len(deduplicated_chunks),
-        )
-        deduplicated_chunks = [deduplicated_chunks[idx] for idx in deduplicated_chunk_ids]
-
-    # Apply chunk_top_k limit if needed
-    if settings.retrieval.chunk_top_k is not None and settings.retrieval.chunk_top_k > 0:
-        if len(deduplicated_chunks) > settings.retrieval.chunk_top_k:
-            deduplicated_chunks = deduplicated_chunks[: settings.retrieval.chunk_top_k]
-            LOGGER.debug(
-                f"Chunk top-k limiting: kept {len(deduplicated_chunks)} chunks (chunk_top_k={settings.retrieval.chunk_top_k})"
-            )
-
-    # Truncate chunk text by chunk_window_tokens
-    # if settings.retrieval.truncate_chunks and settings.retrieval.chunk_window_tokens > 0:
-    #     model = settings.retrieval.tiktoken_model
-    #     deduplicated_chunks = truncate_by_tokens(deduplicated_chunks, settings.retrieval.chunk_window_tokens, model)
-    #     print(f"Truncated chunks: kept {len(deduplicated_chunks)} chunks after truncation")
-    
-
-    return entities_context, relations_context, deduplicated_chunks
+class LightContextReranker:
+    """Rank supplied context independently, then apply the final chunk limit."""
+    def rerank(self, context):
+        config = RetrievalSettings(**context.query_plan.settings)
+        chunks = list(context.chunks)
+        if config.enable_rerank and context.query_plan.query and chunks:
+            rows = light_prompt_rows(context)[2]
+            indices = rerank(context.query_plan.query, rows, config.rerank_top_k or len(chunks), config=config)
+            chunks = [chunks[index] for index in indices]
+        limit = config.chunk_top_k
+        if limit is not None and limit > 0:
+            chunks = chunks[:limit]
+        return replace(context, chunks=chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -945,6 +713,7 @@ def lightrag_prompt(
     relations_context: List[Dict[str, Any]],
     all_chunks: List[Dict[str, Any]],
     history: Optional[List[Tuple[str, str]]]=None,
+    *, config: RetrievalSettings, mode: str,
 ) -> str:
     """Generate a system prompt for LightRAG."""
 
@@ -968,18 +737,18 @@ def lightrag_prompt(
 
 """
     
-    context = naive_context if settings.retrieval.light_mode == "naive" else kg_context + naive_context
-    history_context = get_conversation_turns(history)
+    context = naive_context if mode == "naive" else kg_context + naive_context
+    history_context = get_conversation_turns(history, config.history_turns)
     user_prompt = settings.prompts.default_user_prompt
     sys_prompt_template = (
         PROMPTS["lightrag_response"]
-        if settings.retrieval.light_mode != "naive"
+        if mode != "naive"
         else PROMPTS["naive_rag_response"]
     )
     sys_prompt = sys_prompt_template.format(
         context_data=context,
         content_data=context,
-        response_type=settings.retrieval.response_type,
+        response_type=config.response_type,
         history=history_context,
         user_prompt=user_prompt,
     )
@@ -1010,6 +779,25 @@ def _retrieval_model_metadata() -> Dict[str, Any]:
 # LightRAG entry point
 # ---------------------------------------------------------------------------
 
+async def generate_light_answer(query, context, history, *, chat_factory=None):
+    if context.query_plan.metadata.get("empty_keywords"):
+        return PROMPTS["fail_response"]
+    config = RetrievalSettings(**context.query_plan.settings)
+    entities, relations, chunks = light_prompt_rows(context)
+    prompt = lightrag_prompt(entities, relations, chunks, history=history, config=config, mode=context.query_plan.mode)
+    chat = (chat_factory or RetrieveChat)(system_prompt=prompt)
+    return await chat.generate(prompt=query, max_tokens=config.llm_max_tokens,
+                               temperature=config.llm_temperature)
+
+
+def make_answer_generator(chat_factory=None):
+    """Create an answer adapter that needs supplied context and a model, without storage."""
+    return AsyncTextAnswerGenerator(
+        lambda query, context, history: generate_light_answer(query, context, history, chat_factory=chat_factory),
+        model=_retrieval_model_metadata(),
+    )
+
+
 class LightRAG:
     """
     LightRAG retriever that integrates storage and LLM to answer questions.
@@ -1026,7 +814,15 @@ class LightRAG:
         project_paths: Optional[ProjectPaths] = None,
         system_prompt: Optional[str] = None,
         log_file: Optional[str] = None,
+        query_analyzer=None, candidate_retriever=None, context_builder=None,
+        answer_generator=None, reranker=None, audit_recorder=None,
     ) -> None:
+        self._query_analyzer = query_analyzer
+        self._candidate_retriever = candidate_retriever
+        self._context_builder = context_builder
+        self._answer_generator = answer_generator
+        self._reranker = reranker
+        self._audit_recorder = audit_recorder
         self._project_paths = project_paths
         effective_storage_paths = (
             storage_paths
@@ -1059,108 +855,22 @@ class LightRAG:
         if callable(close_method):
             close_method()
 
-    async def aretrieve(
-        self,
-        question: str,
-        conversation_history: Optional[List[Tuple[str, str]]] = None,
-        allowed_document_names: Optional[Iterable[str]] = None,
-    ) -> RetrievalResult:
-        """Asynchronous retrieval method."""
-        LOGGER.info("Running LightRAG retrieval for query: %s", question)
-
-        # 1) Extract keywords
-        hl_keywords, ll_keywords = await extract_keywords(
-            self._chat,
-            question,
-            conversation_history,
-            settings.retrieval.history_turns
-        )    
-
-        LOGGER.debug(f"Extracted keywords - HL: {hl_keywords}, LL: {ll_keywords}")
-        retrieval_mode = settings.retrieval.light_mode
-        # Handle empty keywords
-        if hl_keywords == [] and ll_keywords == []:
-            LOGGER.warning("low_level_keywords and high_level_keywords is empty")
-            return RetrievalResult(
-                answer=PROMPTS["fail_response"],
-                entities_context=[],
-                relations_context=[],
-                all_chunks=[],
-                hl_keywords=[],
-                ll_keywords=[],
-            )
-        if ll_keywords == [] and retrieval_mode in ["local", "hybrid"]:
-            LOGGER.warning(f"low_level_keywords is empty, switching from {retrieval_mode} mode to global mode")
-            retrieval_mode = "global"
-        if hl_keywords == [] and retrieval_mode in ["global", "hybrid"]:
-            LOGGER.warning(f"high_level_keywords is empty, switching from {retrieval_mode} mode to local mode")
-            retrieval_mode = "local"
-
-        # 2-4) Build context
-        entities_context, relations_context, all_chunks = build_context(
-            self._storage,
-            question,
-            hl_keywords,
-            ll_keywords,
-            retrieval_mode=retrieval_mode,
-            top_k_entities=settings.retrieval.entity_top_k,
-            top_k_relations=settings.retrieval.relation_top_k,
-            top_k_chunks=settings.retrieval.chunk_top_k,
-            top_k_chunk_per_entity=settings.retrieval.top_k_chunk_per_entity,
-            allowed_document_names=allowed_document_names,
-        )
-
-        # Format context for prompt
-        lightrag_sys_prompt = lightrag_prompt(
-            entities_context=entities_context,
-            relations_context=relations_context,
-            all_chunks=all_chunks,
-            history=conversation_history,
-        )
-
-        # Generate answer
-        chat = RetrieveChat(system_prompt=lightrag_sys_prompt)
-        answer = await chat.generate(
-            prompt=question,
-            max_tokens=settings.retrieval.llm_max_tokens,
-            temperature=settings.retrieval.llm_temperature,
-        )
-
-        result = RetrievalResult(
-            answer=answer,
-            entities_context=entities_context,
-            relations_context=relations_context,
-            all_chunks=all_chunks,
-            hl_keywords=hl_keywords,
-            ll_keywords=ll_keywords,
-        )
-        if settings.logging.audit_enabled:
-            write_audit_log(
-                project_paths=self._project_paths,
-                retriever_name="lightrag",
-                payload={
-                    "question": question,
-                    "answer": answer,
-                    "active_documents_root": str(self._project_paths.documents_root)
-                    if self._project_paths
-                    else None,
-                    "conversation_history": conversation_history or [],
-                    "retrieval_metadata": {
-                        "retrieval_mode": retrieval_mode,
-                        "response_type": settings.retrieval.response_type,
-                        "entity_top_k": settings.retrieval.entity_top_k,
-                        "relation_top_k": settings.retrieval.relation_top_k,
-                        "chunk_top_k": settings.retrieval.chunk_top_k,
-                        "top_k_chunk_per_entity": settings.retrieval.top_k_chunk_per_entity,
-                    },
-                    "model": _retrieval_model_metadata(),
-                    "high_level_keywords": hl_keywords,
-                    "low_level_keywords": ll_keywords,
-                    "retrieved_entities": entities_context,
-                    "retrieved_relationships": relations_context,
-                    "retrieved_chunks": all_chunks,
-                },
-            )
+    async def aretrieve(self, question, conversation_history=None, allowed_document_names=None) -> AnswerResult:
+        config = settings.retrieval
+        analyzer = self._query_analyzer or AsyncKeywordQueryAnalyzer(
+            lambda query, history: extract_keywords(self._chat, query, history, config.history_turns, config=config),
+            mode=config.light_mode, settings=asdict(config))
+        plan = await analyze_query_async(question, conversation_history or [], analyzer)
+        # Naive retrieval does not require graph keywords.
+        empty = not plan.high_level_keywords and not plan.low_level_keywords and plan.mode != "naive"
+        plan = replace(plan, metadata={**plan.metadata, "empty_keywords": empty,
+            "allowed_document_names": list(allowed_document_names) if allowed_document_names is not None else None})
+        candidates = stages.retrieve_candidates(plan, self._candidate_retriever or LightCandidateRetriever(self._storage))
+        context = stages.build_context(plan, candidates, self._context_builder or LightContextBuilder())
+        context = stages.rerank_context(context, self._reranker or LightContextReranker())
+        result = await generate_answer_async(question, context, plan.history,
+            self._answer_generator or make_answer_generator())
+        record_chat_audit(result, self._project_paths, self._audit_recorder)
         return result
 
     def retrieve(
@@ -1168,10 +878,10 @@ class LightRAG:
         question: str,
         conversation_history: Optional[List[Tuple[str, str]]] = None,
         allowed_document_names: Optional[Iterable[str]] = None,
-    ) -> RetrievalResult:
+    ) -> AnswerResult:
         """Synchronous helper that creates an event loop if needed."""
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.aretrieve(question, conversation_history, allowed_document_names))
         else:
@@ -1185,5 +895,5 @@ __all__ = [
     "LightRAG",
     "StorageAdapter",
     "StoragePaths",
-    "RetrievalResult",
+    "AnswerResult",
 ]

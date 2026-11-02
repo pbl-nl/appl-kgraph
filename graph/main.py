@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from ingestion import ingest_paths
-from lightrag import LightRAG, RetrievalResult
+from lightrag import LightRAG
+from schemas import AnswerResult
 from pathrag import PathRAG, render_full_context
 from project_paths import list_document_paths, resolve_project_paths
 from settings import settings
@@ -21,10 +22,13 @@ async def ask_with_pathrag(
 ) -> None:
     project_paths = resolve_project_paths(documents_root)
     rag = PathRAG(project_paths=project_paths, system_prompt="")
-    result = await rag.aretrieve(question, conversation_history=conversation_history)
-    print("Answer:\n", result.answer)
-    if verbose:
-        print(render_full_context(result))
+    try:
+        result = await rag.aretrieve(question, conversation_history=conversation_history)
+        print("Answer:\n", result.answer)
+        if verbose:
+            print(render_full_context(result))
+    finally:
+        rag.close()
 
 
 async def ask_with_lightrag(
@@ -33,16 +37,19 @@ async def ask_with_lightrag(
     documents_root: Path,
     verbose: bool = False,
     history: Optional[List[Tuple[str, str]]] = None,
-) -> RetrievalResult:
+) -> AnswerResult:
     project_paths = resolve_project_paths(documents_root)
     rag = LightRAG(project_paths=project_paths, system_prompt="")
-    result = await rag.aretrieve(question, conversation_history=history)
-    print("Answer:\n", result.answer)
-    if verbose:
-        from lightrag import render_full_context as render_lightrag_context
+    try:
+        result = await rag.aretrieve(question, conversation_history=history)
+        print("Answer:\n", result.answer)
+        if verbose:
+            from lightrag import render_full_context as render_lightrag_context
 
-        print(render_lightrag_context(result))
-    return result
+            print(render_lightrag_context(result))
+        return result
+    finally:
+        rag.close()
 
 
 def main() -> None:

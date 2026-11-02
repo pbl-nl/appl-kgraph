@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from path_utils import source_filename
 from typing import List, Tuple
 
 from db_storage import DocumentsDB
@@ -60,6 +61,6 @@ def stored_document_names(folder_path: str) -> List[str]:
                 for raw_path in raw_filepaths.split("||"):
                     token = raw_path.strip()
                     if token:
-                        names.add(Path(token).name)
+                        names.add(source_filename(token))
 
     return sorted(names, key=str.lower)

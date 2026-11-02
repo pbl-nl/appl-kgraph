@@ -1,4 +1,3 @@
-import os
 import sys
 import types
 import json
@@ -7,9 +6,6 @@ from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 sys.modules.setdefault("fitz", types.ModuleType("fitz"))
 
@@ -356,7 +352,10 @@ def test_ingestion_does_not_skip_file_after_crash_post_chunk_vectors(monkeypatch
         first_run = True
 
         def __init__(self, *args, **kwargs):
-            pass
+            self.graphdb = SimpleNamespace(
+                list_nodes=lambda: [],
+                list_edges=lambda: [],
+            )
 
         def init(self):
             return None

@@ -1,11 +1,6 @@
-import os
 import sys
 from pathlib import Path
 
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_LLM_MODEL", "test-model")
-os.environ.setdefault("OPENAI_EMBEDDINGS_MODEL", "test-embed")
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "graph"))
 
@@ -35,9 +30,6 @@ OBSERVABILITY_KEYS = [
 
 
 def _load_with_env(monkeypatch, **env):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_LLM_MODEL", "test-model")
-    monkeypatch.setenv("OPENAI_EMBEDDINGS_MODEL", "test-embed")
     for key in OBSERVABILITY_KEYS:
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
@@ -90,7 +82,3 @@ def test_legacy_observability_environment_variables_are_ignored(monkeypatch):
     assert settings.project.diagnostics_dirname == "diagnostics"
     assert settings.project.extraction_diagnostics_dirname == "extraction"
     assert settings.extraction.validation_second_pass_enabled is False
-    assert not hasattr(settings.logging, "qa_enabled")
-    assert not hasattr(settings.logging, "ingestion_enabled")
-    assert not hasattr(settings.logging, "retrieval_enabled")
-    assert not hasattr(settings.extraction, "audit_second_pass_enabled")

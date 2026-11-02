@@ -191,6 +191,22 @@ docker run --rm -it --env-file .env \
   appl-kgraph python graph/main.py /app/docs
 ```
 
+For **Windows PowerShell**, run the following from the project root containing
+`.env`. Make sure the `docs_store` folder exists and contains your documents:
+
+```powershell
+docker run --rm -it --env-file .env `
+  --mount "type=bind,source=${PWD}/docs_store,target=/app/docs" `
+  --mount "type=volume,source=appl-kgraph-models,target=/app/flashrank_model" `
+  appl-kgraph python graph/main.py /app/docs
+```
+
+PowerShell uses a backtick (`` ` ``) for line continuation; it must be the last
+character on the line, with no trailing spaces. Do not copy the `>>` prompts
+shown by PowerShell. `${PWD}/docs_store` supplies the absolute host path, while
+the application reads `/app/docs` inside the container. Generated indexes and
+logs persist in `docs_store/.appl-kgraph` on the host.
+
 The image installs the same `appl-kgraph.yml` Conda environment as local development,
 using Python 3.13. DOCX conversion currently depends on Microsoft Word
 and does not work in this Linux container; convert DOCX files to PDF before

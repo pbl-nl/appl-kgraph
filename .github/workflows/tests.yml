@@ -1,0 +1,45 @@
+name: Linux and Windows tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python 3.13 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      MPLBACKEND: Agg
+      REQUIRE_LIBREOFFICE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LibreOffice on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer fonts-dejavu-core
+      - name: Install LibreOffice on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install libreoffice-fresh --yes --no-progress
+      - uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-file: appl-kgraph.yml
+          cache-environment: true
+          init-shell: bash
+      - name: Test OpenAI configuration
+        shell: bash -el {0}
+        run: python -m pytest -q --llm-provider=openai
+      - name: Test Azure configuration
+        if: ${{ !cancelled() }}
+        shell: bash -el {0}
+        run: python -m pytest -q --llm-provider=azure

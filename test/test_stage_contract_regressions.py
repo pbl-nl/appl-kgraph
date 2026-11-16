@@ -107,8 +107,8 @@ def test_docx_conversion_preserves_source_neighbors_and_cleans_temporary_files(
     neighbor.write_bytes(b"existing user file")
     outputs = []
 
-    def convert(input_path, output_path, keep_active):
-        assert Path(input_path) == source and keep_active is True
+    def convert(input_path, output_path):
+        assert Path(input_path) == source
         pdf_path = Path(output_path)
         assert pdf_path.parent != source.parent
         outputs.append(pdf_path)
@@ -119,7 +119,7 @@ def test_docx_conversion_preserves_source_neighbors_and_cleans_temporary_files(
                 pdf.new_page().insert_text((72, 72), "Alpha works with Beta.")
                 pdf.save(pdf_path)
 
-    monkeypatch.setattr(fileparser, "convert", convert)
+    monkeypatch.setattr(fileparser, "convert_docx_to_pdf", convert)
     if broken_pdf:
         with pytest.raises(DocumentParseError):
             parse_document(DocumentRef(source), FileDocumentParser())

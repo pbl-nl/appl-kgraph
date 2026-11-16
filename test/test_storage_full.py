@@ -46,7 +46,10 @@ def fresh_storage(tmp_path):
     paths = _make_paths(str(tmp_path))
     st = Storage(paths=paths, embedder=_DeterministicEmbedder())
     st.init()
-    return st
+    try:
+        yield st
+    finally:
+        st.close()
 
 
 # Use ONLY example data from test_store.py

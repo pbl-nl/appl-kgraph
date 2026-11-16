@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from collections import defaultdict
 from pathlib import Path
+from path_utils import source_filename
 
 import networkx as nx
 import tiktoken
@@ -52,7 +53,7 @@ def _filepath_matches_allowed(raw_filepaths: Any, allowed_documents: Optional[se
         token = token.strip()
         if not token:
             continue
-        name = Path(token).name.strip().lower()
+        name = source_filename(token).strip().lower()
         if name and name in allowed_documents:
             return True
     return False
@@ -65,9 +66,9 @@ def _chunk_matches_allowed(chunk: "ChunkMatch", allowed_documents: Optional[set[
     document_id = (chunk.document_id or "").strip()
     candidates = {
         filename.lower(),
-        Path(filename).name.lower(),
+        source_filename(filename).lower(),
         document_id.lower(),
-        Path(document_id).name.lower(),
+        source_filename(document_id).lower(),
     }
     candidates.discard("")
     return bool(candidates & allowed_documents)

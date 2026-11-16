@@ -123,13 +123,17 @@ OPENAI_EMBEDDINGS_MODEL="..."
 LLM_PROVIDER="openai"
 ```
 
-If your document collection includes `.docx` files, ensure that **Microsoft Word** is installed.
+PDF, TXT, Markdown, and HTML ingestion works without an office suite.
+For DOCX, install **LibreOffice Writer** on Linux or **LibreOffice / Microsoft Word**
+on Windows. The parser uses LibreOffice when available and otherwise uses Word on
+Windows or macOS. DOCX is converted to a temporary PDF to preserve page-based
+citations; pagination can differ between office suites and installed fonts.
 
 ---
 
 ### Python environment setup
 
-Conda is the supported developer environment, including on PBL Azure Virtual Desktop.
+Conda is the supported developer environment on Linux and Windows, including PBL Azure Virtual Desktop.
 Run these commands from the repository root in Anaconda Prompt or a shell with
 Conda initialized:
 
@@ -147,6 +151,34 @@ conda env update -f appl-kgraph.yml --prune
 ```
 
 Configure either Azure OpenAI or OpenAI in `.env` as described above.
+
+For DOCX on **Ubuntu/Debian**, install the system converter:
+
+```sh
+sudo apt-get update
+sudo apt-get install libreoffice-writer fonts-dejavu-core
+```
+
+On **Windows**, install [LibreOffice](https://www.libreoffice.org/download/download-libreoffice/)
+or Microsoft Word. LibreOffice is detected on `PATH` and in the standard
+`Program Files/LibreOffice/program` installation folder. For a custom installation,
+add its `program` folder to `PATH`. Office applications are not installed by Conda.
+LibreOffice uses an isolated profile for each conversion and does not need a desktop
+session. Word fallback keeps existing Word sessions open.
+
+The same launch commands work from a Linux shell and Windows Anaconda Prompt
+or PowerShell with Conda initialized:
+
+```text
+python graph/app.py
+python graph/main.py "docs"
+```
+
+Open [the Gradio UI](http://localhost:7860) after starting `graph/app.py`.
+Use a local document folder, such as `/home/user/documents` on Linux or
+`C:\Users\user\Documents` on Windows. Quote paths containing spaces in the CLI.
+The folder must be writable because generated storage is placed in `.appl-kgraph`
+inside it. Saved source filenames are recognized with either path separator.
 
 ---
 
@@ -208,9 +240,7 @@ the application reads `/app/docs` inside the container. Generated indexes and
 logs persist in `docs_store/.appl-kgraph` on the host.
 
 The image installs the same `appl-kgraph.yml` Conda environment as local development,
-using Python 3.13. DOCX conversion currently depends on Microsoft Word
-and does not work in this Linux container; convert DOCX files to PDF before
-ingesting them.
+using Python 3.13. It includes LibreOffice Writer and basic fonts for DOCX ingestion.
 
 ### Running the project
 

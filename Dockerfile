@@ -7,9 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MPLBACKEND=Agg
 
 USER root
-# ONNX Runtime uses OpenMP; pydub/Gradio use ffmpeg for media handling.
+# ONNX Runtime uses OpenMP; LibreOffice converts DOCX without Microsoft Word.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 ffmpeg \
+    && apt-get install -y --no-install-recommends libgomp1 ffmpeg libreoffice-writer fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/docs /app/flashrank_model \
     && chown -R $MAMBA_USER:$MAMBA_USER /app
